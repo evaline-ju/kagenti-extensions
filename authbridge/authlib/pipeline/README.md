@@ -1,17 +1,22 @@
-# pipeline — Plugin Pipeline Specification
+# pipeline — Framework Architecture Reference
 
-The `pipeline` package defines AuthBridge's plugin contract: how plugins are written, how they communicate through shared state, how they compose into ordered chains, and how those chains run inside each of the three listener modes (ext_proc, ext_authz, forward/reverse proxy).
+Framework-level reference for AuthBridge's plugin pipeline: types, composition, lifecycle, shared state, and the boundary with listeners. Pair this with the plugin-author docs:
 
-This document is the reference for AuthBridge's plugin contract. It covers the interface plugins implement, the shared state they communicate through, how the pipeline composes them, and how the listener renders their decisions.
+- **Tutorial** — [`plugins/GUIDE.md`](../plugins/GUIDE.md). Writing a plugin from scratch with runnable examples.
+- **Plugin author reference** — [`plugins/CONVENTIONS.md`](../plugins/CONVENTIONS.md). Config patterns, invocation emission contract, registration rules.
+- **Framework reference** — this file. Pipeline internals and Go surface.
 
 **Audience:**
-- Go developers adding plugins to AuthBridge's native chain.
+- Framework maintainers editing `authbridge/authlib/pipeline/`.
+- Plugin authors who need to understand pipeline composition, lifecycle hooks, the shared state shape, or the observability contract in depth.
 - Anyone debugging the plugin flow via `abctl` or the `:9094` session API.
 
 **Scope:**
 - The Go surface in `authbridge/authlib/pipeline/` and `authbridge/authlib/session/`.
 - The observability contract carried by `SessionEvent` on the `:9094` API.
 - What the pipeline *does* and *does not* own at the boundary with the listener.
+
+For step-by-step "how do I write a plugin?" content, see [`plugins/GUIDE.md`](../plugins/GUIDE.md) first.
 
 ---
 
@@ -125,6 +130,25 @@ type Context struct {
 - `Agent`, `Route`, `Session` are populated by the listener before `Run`. Plugins treat them as read-only.
 - `ResponseBody` appears between `Run` and `RunResponse` — plugins must not read it in `OnRequest`.
 
+**Framework-owned attribution.** `pipeline.Run` / `RunResponse` stamp the currently-dispatching plugin's name and phase onto unexported fields of `pctx` around each plugin call. These drive the `pctx.Record` family of helpers so Invocation entries are auto-attributed without plugin-side ceremony. Plugins can't set them directly (unexported); exported `SetCurrentPlugin` / `ClearCurrentPlugin` exist for test harnesses that invoke plugins outside a `Pipeline.Run` dispatch loop.
+
+**Recording Invocations.** Plugins emit per-call diagnostic records through Context helpers:
+
+```go
+pctx.Allow("authorized")                          // gate approved
+pctx.Skip("path_bypass")                          // plugin ran but didn't act
+pctx.Observe("matched_tools/call")                // parser extracted data
+pctx.Modify("token_replaced")                     // plugin mutated the message
+pctx.Record(pipeline.Invocation{                  // full form with diagnostic fields
+    Action:       pipeline.ActionDeny,
+    Reason:       "jwt_failed",
+    ExpectedIssuer: issuer,
+})
+return pctx.DenyAndRecord(reason, code, message)  // emit + reject in one call
+```
+
+Framework fills `Plugin`, `Phase`, `Path`; authors supply only what's specific to this call. See [`plugins/CONVENTIONS.md`](../plugins/CONVENTIONS.md#emitting-session-events) for the full 5-value action vocabulary and field reference.
+
 **Lifetime:** one `*Context` per HTTP transaction. Not reused across requests. Single-threaded — the pipeline guarantees sequential invocation of plugins within a phase, so plugins don't need internal locking for pctx reads/writes.
 
 ---
@@ -133,27 +157,62 @@ type Context struct {
 
 ```go
 type Extensions struct {
-    MCP        *MCPExtension
-    A2A        *A2AExtension
-    Security   *SecurityExtension
-    Delegation *DelegationExtension
-    Inference  *InferenceExtension
-    Custom     map[string]any
+    MCP         *MCPExtension
+    A2A         *A2AExtension
+    Security    *SecurityExtension
+    Delegation  *DelegationExtension
+    Inference   *InferenceExtension
+    Invocations *Invocations       // per-plugin action records for every plugin that ran
+    Custom      map[string]any     // plugin-private state + escape-hatch public events
 }
 ```
 
-Two categories:
+Three categories of cross-plugin / cross-phase state:
 
-### Named slots (telemetry-worthy)
-MCP, A2A, Security, Delegation, Inference. These are:
+### Invocations — per-plugin action record (always recorded)
+
+Every plugin that runs on a pipeline pass appends at least one `Invocation` to this slot via the `pctx.Record` family of helpers. The listener snapshots it onto `SessionEvent.Invocations` so `abctl` and `/v1/sessions` see a per-plugin timeline.
+
+```go
+type Invocation struct {
+    Plugin           string           // plugin.Name(); framework-filled
+    Action           InvocationAction // 5-value: allow | deny | skip | modify | observe
+    Phase            InvocationPhase  // "request" | "response"; framework-filled
+    Reason           string           // machine-stable code, e.g. "path_bypass"
+    Path             string           // request path; framework-filled
+
+    // Optional diagnostic fields (populated selectively):
+    ExpectedIssuer, ExpectedAudience string
+    TokenSubject                     string
+    TokenAudience, TokenScopes       []string
+    RouteMatched                     bool
+    RouteHost, TargetAudience        string
+    RequestedScopes                  []string
+    CacheHit                         bool
+}
+
+type Invocations struct {
+    Inbound  []Invocation
+    Outbound []Invocation
+}
+```
+
+Every plugin is expected to call one of `pctx.Allow` / `Skip` / `Observe` / `Modify` / `Record` / `DenyAndRecord` per active phase — see [`plugins/CONVENTIONS.md`](../plugins/CONVENTIONS.md#emitting-session-events) for the full field reference and 5-value vocabulary.
+
+### Named protocol slots (telemetry-worthy, optional per plugin)
+MCP, A2A, Inference, plus Security and Delegation. These are:
 - Part of the **published schema** carried on `SessionEvent` to `:9094` / `abctl`.
 - Consumable by multiple downstream plugins.
 - Added to the core struct only when the data has a public contract.
 
-Adding a named slot is an authlib-core change: edit `Extensions`, add a `SessionEventWire` field, update `snapshotXXX` helpers in the listener, and add filtering rules in `abctl`.
+A parser populates its slot AND records an Invocation with `ActionObserve`. The slot carries the structured payload (method, token counts, etc.); the Invocation carries the attribution.
 
-### `Custom map[string]any` + `GetState[T]`/`SetState[T]` (plugin-private)
-For state that's internal to a single plugin or to a bridge's sub-pipeline:
+Adding a named slot is an authlib-core change: edit `Extensions`, add a wire field on `sessionEventWire`, update `snapshotXXX` helpers in the listener, and add filtering rules in `abctl`.
+
+### `Custom map[string]any` — plugin-private state + escape-hatch public events
+Two access patterns share the same map, disambiguated by key suffix.
+
+**Plugin-private cross-phase state.** Use `GetState[T]` / `SetState[T]`:
 
 ```go
 // Plugin's private state type:
@@ -173,6 +232,17 @@ if s != nil { /* use s */ }
 Convention: **key = plugin's Name()** so collisions across plugins don't happen. Storage is lazy (`Custom` is nil-initialized until first write).
 
 `GetState[T]` type-asserts and returns `nil` on mismatch instead of panicking — a plugin whose type evolves across versions degrades gracefully.
+
+**Plugin-public escape-hatch events.** Write a key ending in `pipeline.PluginEventSuffix` (`"/event"`) with a JSON-marshalable value; the listener promotes it to `SessionEvent.Plugins[pluginName]` on the wire:
+
+```go
+pctx.Extensions.Custom["rate-limiter" + pipeline.PluginEventSuffix] = rateLimiterEvent{
+    Allowed:    true,
+    TokensLeft: 42,
+}
+```
+
+The suffix is the opt-in marker — private state stays out of the session stream. Graduate to a named slot when two or more plugins share the shape. See [`plugins/CONVENTIONS.md`](../plugins/CONVENTIONS.md#emitting-session-events) for the graduation criteria.
 
 ### Built-in extension shapes
 
@@ -416,23 +486,30 @@ The pipeline itself is **in-band** (plugins alter request handling). Alongside i
 
 ```go
 type SessionEvent struct {
-    SessionID      string              // bucket the event landed in
+    SessionID      string                     // bucket the event landed in
     At             time.Time
-    Direction      Direction           // inbound | outbound
-    Phase          SessionPhase        // request | response
-    A2A            *A2AExtension       // snapshot of pctx.Extensions.A2A
+    Direction      Direction                  // inbound | outbound
+    Phase          SessionPhase               // request | response | denied
+    A2A            *A2AExtension              // snapshot of pctx.Extensions.A2A
     MCP            *MCPExtension
     Inference      *InferenceExtension
-    Identity       *EventIdentity      // Subject, ClientID, AgentID, Scopes
-    StatusCode     int                 // response phase only
-    Error          *EventError         // populated on 4xx/5xx
-    Host           string              // :authority
-    TargetAudience string              // outbound: resolved OAuth audience
-    Duration       time.Duration       // response: wall-clock since request entry
+    Invocations    *Invocations               // per-plugin action records, filtered by phase
+    Plugins        map[string]json.RawMessage // plugin-public events (escape-hatch /event suffix)
+    Identity       *EventIdentity             // Subject, ClientID, AgentID, Scopes
+    StatusCode     int                        // response phase only
+    Error          *EventError                // populated on 4xx/5xx
+    Host           string                     // :authority
+    TargetAudience string                     // outbound: resolved OAuth audience
+    Duration       time.Duration              // response: wall-clock since request entry
 }
 ```
 
-**Plugins do not touch `SessionEvent` directly.** The listener records events; plugins only read `pctx.Session` (a `*SessionView`) when they want to correlate the current request with prior ones in the same conversation — e.g. a rate-limiter that counts a session's inference events.
+**Three phase values:**
+- `request` — snapshot taken after the request pipeline completes, carrying request-phase invocations.
+- `response` — snapshot taken after the response pipeline completes, carrying response-phase invocations. Status, duration, and response parser output live here.
+- `denied` — terminal denial by a pipeline plugin (jwt-validation reject, token-exchange failure, guardrail block). Carries the request-phase invocations plus the Violation's structured `Error`.
+
+**Plugins do not touch `SessionEvent` directly.** The listener records events. Plugins append Invocations via `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord`, populate extension slots (A2A / MCP / Inference) via assignment, and read `pctx.Session` (a `*SessionView`) when they want to correlate the current request with prior ones in the same conversation — e.g. a rate-limiter that counts a session's inference events.
 
 Wire format (`SessionEvent.MarshalJSON`) translates enums to strings and `Duration` to `DurationMs`. Round-trip stable — `json.Marshal(e) → json.Unmarshal → json.Marshal` is byte-identical. Tested at `pipeline/session_test.go:TestSessionEvent_JSONRoundTrip`.
 
@@ -460,80 +537,13 @@ The pipeline **does own**:
 
 ---
 
-## 9. Writing a native plugin — a worked example
+## 9. Writing a plugin
 
-A minimal outbound plugin that stamps an extra header on any request routed to GitHub:
+For a step-by-step tutorial that walks through building a new plugin from scratch — minimal plugin, recording invocations, rejection, config, body access, out-of-tree packaging, testing — see [`plugins/GUIDE.md`](../plugins/GUIDE.md).
 
-```go
-package myplugins
+For the plugin-author reference (config conventions, invocation field list, registration rules, 5-value action vocabulary), see [`plugins/CONVENTIONS.md`](../plugins/CONVENTIONS.md).
 
-import (
-    "context"
-    "github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-)
-
-type GitHubStamper struct{}
-
-func (GitHubStamper) Name() string { return "github-stamper" }
-
-func (GitHubStamper) Capabilities() pipeline.PluginCapabilities {
-    return pipeline.PluginCapabilities{
-        // We don't need body buffering, and don't depend on other plugins' data.
-    }
-}
-
-func (GitHubStamper) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
-    if pctx.Route != nil && pctx.Route.Audience == "github-tool" {
-        pctx.Headers.Set("x-from-authbridge", "1")
-    }
-    return pipeline.Action{Type: pipeline.Continue}
-}
-
-func (GitHubStamper) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
-    return pipeline.Action{Type: pipeline.Continue}
-}
-```
-
-Registered in the outbound pipeline alongside the built-in plugins at startup in `cmd/authbridge/main.go`.
-
-A plugin that reads the caller's SPIFFE ID from inbound claims and records a per-session counter via `GetState`/`SetState`:
-
-```go
-type sessionCounter struct{ N int }
-
-func (p *Counter) Name() string { return "turn-counter" }
-
-func (p *Counter) Capabilities() pipeline.PluginCapabilities {
-    return pipeline.PluginCapabilities{Reads: []string{"a2a"}}
-}
-
-func (p *Counter) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
-    if pctx.Direction != pipeline.Inbound || pctx.Extensions.A2A == nil {
-        return pipeline.Action{Type: pipeline.Continue}
-    }
-    state := pipeline.GetState[sessionCounter](pctx, p.Name())
-    if state == nil {
-        state = &sessionCounter{}
-        pipeline.SetState(pctx, p.Name(), state)
-    }
-    state.N++
-    if state.N > 10 {
-        return pipeline.RateLimited(30*time.Second,
-            "policy.rate-limited", "per-session turn limit exceeded")
-    }
-    return pipeline.Action{Type: pipeline.Continue}
-}
-```
-
-Plugins express rejections through a structured `Violation` carrying a
-machine-readable `Code`, a short `Reason`, an optional longer
-`Description`, a `Details` map for plugin-arbitrary context, and HTTP-
-rendering hints (`Status`, `Body`, `BodyType`, `Headers`). Default JSON
-body synthesis covers the 95% case — set the hints only when overriding.
-Helper constructors (`Deny`, `DenyStatus`, `DenyWithDetails`,
-`Challenge`, `RateLimited`) make the common cases one-liners. See
-`action.go` for the full surface and `action_test.go` for worked
-examples.
+This document stays focused on the pipeline framework internals — how plugins compose, how the shared state is shaped, how control flows. The two plugins-side docs build on top of it.
 
 ---
 
@@ -555,7 +565,11 @@ The plugin interface is **not** semver-stable yet (AuthBridge is pre-1.0). Chang
 - Extended `InferenceExtension` with structured tools + tool calls + TopP / ToolChoice.
 - Added `SessionEvent.MarshalJSON`/`UnmarshalJSON` round-trip contract.
 - **Breaking**: replaced `Action.Status`/`Action.Reason` with `Action.Violation` (see §5). Migration: use `Deny()`, `DenyStatus()`, `Challenge()`, `RateLimited()` helpers.
-- Added optional `Initializer` / `Shutdowner` interfaces + `Pipeline.Start` / `Pipeline.Stop` (see §6). Existing plugins are unaffected because the interfaces are opt-in via type-assertion.
+- Added optional `Initializer` / `Shutdowner` / `Readier` interfaces + `Pipeline.Start` / `Pipeline.Stop` (see §6). Existing plugins are unaffected because the interfaces are opt-in via type-assertion.
+- Added `SessionDenied` phase and `recordInboundReject` in the listener so denials surface as session events with full diagnostic context.
+- **Unified invocation contract**: `AuthExtension` + `InboundAuth` + `OutboundAuth` collapsed into `Invocations` + `Invocation`. Every plugin (gate, parser, future) emits an Invocation record per pipeline pass using the 5-value `InvocationAction` vocabulary (allow / deny / skip / modify / observe). `SessionEvent.Auth` is now `SessionEvent.Invocations`.
+- **`pctx.Record` helpers**: `Allow` / `Skip` / `Observe` / `Modify` / `Record` / `DenyAndRecord` on `Context`. Framework-managed attribution (`currentPlugin`, `currentPhase`, `Path`) fills Invocation fields automatically.
+- **Open plugin registry**: plugins self-register from `init()` via `plugins.RegisterPlugin`. Third-party plugins in external modules drop in via a side-effect import. Closed `registry` map literal removed.
 
 Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1.0 tag.
 
@@ -563,13 +577,24 @@ Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1
 
 ## 12. Cross-references
 
+**Plugin-author docs** (pair with this framework reference):
+
+- [`plugins/GUIDE.md`](../plugins/GUIDE.md) — step-by-step tutorial for writing a plugin.
+- [`plugins/CONVENTIONS.md`](../plugins/CONVENTIONS.md) — plugin-author reference: config patterns, invocation emission contract, registration rules.
+
+**Package sources:**
+
 - `pipeline.go` — `Pipeline` type, `New`, `Run`, `RunResponse`, `Start`, `Stop`, `Plugins`, `NeedsBody`.
-- `plugin.go` — `Plugin` interface, `PluginCapabilities`, `Initializer`, `Shutdowner`.
+- `plugin.go` — `Plugin` interface, `PluginCapabilities`, `Configurable`, `Initializer`, `Shutdowner`, `Readier`.
 - `action.go` — `Action`, `ActionType`, `Violation`, helper constructors (`Deny`, `DenyStatus`, `DenyWithDetails`, `Challenge`, `RateLimited`), `StatusFromCode`.
-- `context.go` — `Context`, `Direction`, `AgentIdentity`.
-- `extensions.go` — named extension types + `GetState`/`SetState`.
+- `context.go` — `Context`, `Direction`, `AgentIdentity`, and the `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers.
+- `extensions.go` — `Extensions` struct, `Invocation`, `Invocations`, `InvocationAction`, named protocol extensions, `GetState` / `SetState`.
 - `session.go` — `SessionEvent`, `SessionView`, `SessionPhase`, marshalers.
+
+**Downstream integrators:**
+
 - `authlib/session/` — `Store`, `SessionSummary`, ring buffer, TTL / max-events caps.
 - `authlib/sessionapi/` — HTTP API (`/v1/sessions`, `/v1/events`, `/v1/pipeline`) surfacing all of the above.
+- `authlib/plugins/` — built-in plugin implementations and registry.
 - `cmd/authbridge/listener/extproc/` — reference usage for all three phases.
 - `cmd/abctl/` — TUI consumer of the session API, useful as a reference integrator.

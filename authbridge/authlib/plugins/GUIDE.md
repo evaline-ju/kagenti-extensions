@@ -1,5 +1,15 @@
 # Writing a Plugin
 
+**Audience:** someone building their first authbridge plugin. Walks
+from an empty file to a fully-registered plugin with config, recording,
+body access, and tests.
+
+**See also:**
+- [`CONVENTIONS.md`](./CONVENTIONS.md) — field-level reference for config,
+  invocation recording, and the registration contract.
+- [`../pipeline/README.md`](../pipeline/README.md) — framework architecture:
+  how the pipeline composes plugins and the lifecycle of a request.
+
 A step-by-step guide to building a new authbridge plugin. For reference-style
 detail on config, registration, and invocation recording, see
 [`CONVENTIONS.md`](./CONVENTIONS.md).

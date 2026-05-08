@@ -1,10 +1,21 @@
-# Plugin Config Conventions
+# Plugin Author Reference
+
+**Audience:** plugin authors who already know the basics and need the
+contract — field names, invariants, error behaviour, the rules that the
+framework enforces at startup.
+
+**See also:**
+- [`GUIDE.md`](./GUIDE.md) — step-by-step tutorial for writing a new plugin.
+- [`../pipeline/README.md`](../pipeline/README.md) — framework architecture:
+  how the pipeline composes plugins, the lifecycle, the Context / Extensions
+  wire shape.
 
 How plugins under `authbridge/authlib/plugins/` receive, validate, and
-apply their configuration. Everything here is convention — the framework
-only requires `pipeline.Configurable` if the plugin has any config at all.
-The rest of this document exists so that the sixth and tenth plugin
-don't each invent their own style.
+apply their configuration; emit session events; and register themselves
+with the pipeline builder. Everything here is convention — the framework
+only requires `pipeline.Configurable` if the plugin has any config at
+all. The rest of this document exists so that the sixth and tenth
+plugin don't each invent their own style.
 
 ## Scope
 
@@ -274,81 +285,79 @@ authentication isn't happening.
 
 ## Emitting session events
 
-Every plugin MUST emit at least one `Invocation` record per
+Every plugin MUST emit at least one `Invocation` record per active
 `OnRequest` / `OnResponse` call. Plugins may also populate one of the
 typed protocol extensions (`MCP`, `A2A`, `Inference`) when they carry
-structured semantic payload, and may additionally publish arbitrary
-plugin-specific events through the `Custom` escape-hatch map.
+structured semantic payload, and may additionally publish plugin-
+specific events through the `Custom` escape-hatch map.
 
-### 1. Invocation record (required for every plugin)
+> For a tutorial on emitting Invocations — the `pctx.Record` / `Allow`
+> / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers with
+> runnable examples — see [`GUIDE.md` Step 2](./GUIDE.md#step-2--record-what-your-plugin-did).
+> This section is the field-level reference for the `Invocation`
+> struct, the 5-value action vocabulary, and the rules around the
+> Custom escape-hatch map.
+
+### 1. Invocation record — field reference
 
 An `Invocation` says *which* plugin ran and *what* it did, in a
 5-value vocabulary shared across all plugins. abctl renders one row
-per invocation — without an invocation record, a plugin's work is
-invisible to the operator.
-
-Recording is done through `Context` helpers. The framework fills in
-`Plugin`, `Phase`, and `Path` automatically from the currently-
-dispatching plugin + phase + request path; the plugin supplies only
-what's specific to this call.
-
-**For the common passive actions, use the one-liner wrappers:**
+per invocation. Every plugin that runs on a pipeline pass produces
+at least one.
 
 ```go
-pctx.Allow("authorized")                 // ActionAllow + reason
-pctx.Skip("path_bypass")                 // ActionSkip + reason
-pctx.Observe("matched_tools/call")       // ActionObserve + reason
-pctx.Modify("token_replaced")            // ActionModify + reason
+type Invocation struct {
+    Plugin           string           // plugin.Name(); framework-filled
+    Action           InvocationAction // 5-value: allow | deny | skip | modify | observe
+    Phase            InvocationPhase  // "request" | "response"; framework-filled
+    Reason           string           // machine-stable code
+    Path             string           // request path; framework-filled
+
+    // Optional diagnostic fields; populated selectively:
+    ExpectedIssuer, ExpectedAudience string
+    TokenSubject                     string
+    TokenAudience, TokenScopes       []string
+    RouteMatched                     bool
+    RouteHost, TargetAudience        string
+    RequestedScopes                  []string
+    CacheHit                         bool
+}
 ```
 
-**For rejections (control-flow + record in one call):**
+The framework fills `Plugin`, `Phase`, and `Path` when the plugin
+emits via `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` /
+`DenyAndRecord`. A plugin may override those fields explicitly — but
+only in test harnesses where the plugin runs outside a
+`Pipeline.Run` dispatch loop.
 
-```go
-return pctx.DenyAndRecord("jwt_failed", "auth.unauthorized", "token validation failed")
-```
-
-**For invocations that carry diagnostic context** (auth-gate fields,
-route context, cache-hit flag, etc.) use the full `Record`:
-
-```go
-pctx.Record(pipeline.Invocation{
-    Action:           pipeline.ActionDeny,
-    Reason:           result.DenyReasonCode.String(),
-    ExpectedIssuer:   p.cfg.Issuer,
-    ExpectedAudience: audience,
-})
-return pipeline.DenyStatus(result.DenyStatus, code, result.DenyReason)
-```
-
-`Plugin`, `Phase`, and `Path` are left zero — the framework fills
-them. A plugin CAN set them to non-zero values to override (useful
-for test harnesses synthesizing Invocations outside a pipeline run),
-but production plugins should not.
-
-The 5 actions and when to use them:
+**The 5-value action vocabulary** (complete):
 
 | Action | Meaning | Example |
 |---|---|---|
 | `allow` | Gate plugin permitted the request | jwt-validation on valid token |
 | `deny` | Gate plugin rejected the request; pipeline stops | jwt-validation on bad token, token-exchange on IdP failure |
-| `skip` | Plugin ran but didn't act on this message | jwt-validation on a bypass path; parser whose body didn't match |
+| `skip` | Plugin ran but didn't act on this message | jwt-validation bypass path; parser whose body didn't match |
 | `modify` | Plugin mutated the message | token-exchange replaced the Authorization header |
 | `observe` | Plugin attached diagnostic data; flow unchanged | parsers extracting MCP / A2A / Inference state |
 
 `Reason` is a stable machine-readable label (e.g. `path_bypass`,
 `no_matching_route`, `jwt_failed`, `matched_tools/call`) that
-discriminates within an Action value. Filters in abctl can match on
+discriminates within an Action value. abctl filters can match
 either — `/skip` shows every skip action regardless of reason;
 `/path_bypass` narrows to that specific skip flavour.
 
-Fields populated selectively: auth gates fill `ExpectedIssuer` /
-`ExpectedAudience` / `Token*`; outbound routers fill `Route*` and
-`CacheHit`; parsers typically fill only `Plugin` / `Action` /
-`Reason` / `Path` because their semantic payload lives on the typed
-extension slot.
+**Which diagnostic fields to populate:**
 
-NEVER put raw tokens, signatures, or secrets in an `Invocation`. The
-session store has no auth.
+- Auth gates (jwt-validation and kin): `ExpectedIssuer`,
+  `ExpectedAudience`, `TokenSubject`, `TokenAudience`, `TokenScopes`.
+- Outbound routers (token-exchange and kin): `RouteMatched`,
+  `RouteHost`, `TargetAudience`, `RequestedScopes`, `CacheHit`.
+- Parsers: usually none — their semantic payload lives on the typed
+  extension slot (A2A / MCP / Inference). Emit with just Action +
+  Reason.
+
+**NEVER put raw tokens, signatures, or secrets in an Invocation.**
+The session store has no auth.
 
 ### 2. Named protocol extension (optional, for parsers)
 
@@ -423,77 +432,25 @@ imports `authlib/plugins` can register a plugin, regardless of whether it
 lives in this module. The pattern mirrors `database/sql` drivers and
 `log/slog` handlers.
 
-### In-tree plugin (lives in `authbridge/authlib/plugins/`)
+> For a step-by-step walkthrough (in-tree file layout, out-of-tree
+> module + side-effect import, operator YAML wiring), see
+> [`GUIDE.md` Step 6](./GUIDE.md#step-6--out-of-tree-plugins). This
+> section is the field-level reference: the factory shape and the
+> panic-on-misuse guarantees that define the registry's contract.
 
-Every built-in plugin has an `init()` at the top of its file:
+### Factory shape
 
 ```go
 // authbridge/authlib/plugins/jwtvalidation.go
-
-package plugins
-
-func NewJWTValidation() *JWTValidation { return &JWTValidation{} }
-
 func init() {
     RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
 }
 ```
 
-Because the file is in the `plugins` package, `init()` runs automatically
-when anything imports the package (e.g., `authbridge/cmd/authbridge/main.go`
-via `authlib/plugins.Build`).
-
-### Out-of-tree plugin (separate Go module)
-
-A plugin maintained outside kagenti-extensions lives in its own package
-and registers the same way:
-
-```go
-// github.com/acme/kagenti-rate-limiter/ratelimit.go
-
-package ratelimit
-
-import (
-    "github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-    "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-)
-
-type RateLimiter struct { ... }
-
-func (p *RateLimiter) Name() string { return "rate-limiter" }
-func (p *RateLimiter) Capabilities() pipeline.PluginCapabilities { ... }
-func (p *RateLimiter) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action { ... }
-func (p *RateLimiter) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action { ... }
-
-func init() {
-    plugins.RegisterPlugin("rate-limiter", func() pipeline.Plugin {
-        return &RateLimiter{}
-    })
-}
-```
-
-The authbridge binary picks the plugin up via a single side-effect import:
-
-```go
-// authbridge/cmd/authbridge/plugins_extra.go  (or wherever you customize)
-
-package main
-
-import _ "github.com/acme/kagenti-rate-limiter/ratelimit"
-```
-
-With that import, operator YAML can list `rate-limiter` in the pipeline:
-
-```yaml
-pipeline:
-  inbound:
-    plugins:
-      - name: jwt-validation
-      - name: rate-limiter
-        config: { requests_per_minute: 100 }
-```
-
-No fork of kagenti-extensions needed. Plugin is a regular Go module.
+The factory is called once per pipeline instance during `Build`. It must
+return a fresh `pipeline.Plugin`; the registry does not cache the returned
+value. Two pipeline entries with the same name produce two independent
+plugin instances, each decoded from its own `config:` block.
 
 ### Rules and guardrails
 

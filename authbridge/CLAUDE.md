@@ -357,6 +357,8 @@ Every plugin emits one of these 5 action values per invocation, so operators can
 
 Use `reason` to discriminate within an action — e.g. `skip/path_bypass` vs `skip/no_matching_route` tell different stories at the detail-pane level but both scan as "skip" in the at-a-glance timeline.
 
+> **Producer-side contract:** the authoritative definition of the 5-value vocabulary, the `Invocation` struct fields, and which diagnostic fields each plugin type populates lives in [`authlib/plugins/CONVENTIONS.md`](authlib/plugins/CONVENTIONS.md#emitting-session-events). Edit that file when the vocabulary changes; this table is the consumer-side summary.
+
 ### Gotcha: denied requests
 
 Rejected requests (401 / 503) land as `phase: "denied"` events in `/v1/sessions` when at least one pipeline plugin appended an Invocation before rejecting. If you're debugging an unauthorized-access pattern, the default-session bucket (`GET /v1/sessions/default`) is where denial events aggregate.
