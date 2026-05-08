@@ -16,6 +16,10 @@ type MCPParser struct{}
 
 func NewMCPParser() *MCPParser { return &MCPParser{} }
 
+func init() {
+	RegisterPlugin("mcp-parser", func() pipeline.Plugin { return NewMCPParser() })
+}
+
 func (p *MCPParser) Name() string { return "mcp-parser" }
 
 func (p *MCPParser) Capabilities() pipeline.PluginCapabilities {

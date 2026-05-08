@@ -16,6 +16,10 @@ type InferenceParser struct{}
 
 func NewInferenceParser() *InferenceParser { return &InferenceParser{} }
 
+func init() {
+	RegisterPlugin("inference-parser", func() pipeline.Plugin { return NewInferenceParser() })
+}
+
 func (p *InferenceParser) Name() string { return "inference-parser" }
 
 func (p *InferenceParser) Capabilities() pipeline.PluginCapabilities {

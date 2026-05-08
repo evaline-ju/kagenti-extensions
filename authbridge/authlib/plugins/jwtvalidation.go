@@ -160,6 +160,10 @@ type JWTValidation struct {
 // called before the pipeline accepts traffic.
 func NewJWTValidation() *JWTValidation { return &JWTValidation{} }
 
+func init() {
+	RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
+}
+
 func (p *JWTValidation) Name() string { return "jwt-validation" }
 
 func (p *JWTValidation) Capabilities() pipeline.PluginCapabilities {

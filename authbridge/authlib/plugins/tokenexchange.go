@@ -203,6 +203,10 @@ type TokenExchange struct {
 // NewTokenExchange constructs an unconfigured plugin.
 func NewTokenExchange() *TokenExchange { return &TokenExchange{} }
 
+func init() {
+	RegisterPlugin("token-exchange", func() pipeline.Plugin { return NewTokenExchange() })
+}
+
 func (p *TokenExchange) Name() string { return "token-exchange" }
 
 func (p *TokenExchange) Capabilities() pipeline.PluginCapabilities {

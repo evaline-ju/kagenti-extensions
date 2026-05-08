@@ -16,6 +16,10 @@ type A2AParser struct{}
 
 func NewA2AParser() *A2AParser { return &A2AParser{} }
 
+func init() {
+	RegisterPlugin("a2a-parser", func() pipeline.Plugin { return NewA2AParser() })
+}
+
 func (p *A2AParser) Name() string { return "a2a-parser" }
 
 func (p *A2AParser) Capabilities() pipeline.PluginCapabilities {
