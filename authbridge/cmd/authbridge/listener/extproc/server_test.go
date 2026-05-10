@@ -418,7 +418,7 @@ func TestExtProc_RequestBodyMutation_Inbound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &Server{InboundPipeline: inbound, OutboundPipeline: outbound}
+	srv := &Server{InboundPipeline: pipeline.NewHolder(inbound), OutboundPipeline: pipeline.NewHolder(outbound)}
 
 	body := []byte(`{"original":"payload"}`)
 	stream := &mockStream{

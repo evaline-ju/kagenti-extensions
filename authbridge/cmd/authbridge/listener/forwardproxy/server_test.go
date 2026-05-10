@@ -201,7 +201,7 @@ func TestForwardProxy_RequestBodyMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &Server{OutboundPipeline: p, Client: http.DefaultClient}
+	srv := &Server{OutboundPipeline: pipeline.NewHolder(p), Client: http.DefaultClient}
 	proxy := httptest.NewServer(srv.Handler())
 	defer proxy.Close()
 

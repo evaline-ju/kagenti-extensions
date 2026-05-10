@@ -171,7 +171,7 @@ func TestReverseProxy_RequestBodyMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := NewServer(p, nil, backend.URL)
+	srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
