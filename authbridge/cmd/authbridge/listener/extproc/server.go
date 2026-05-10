@@ -373,9 +373,8 @@ func (s *Server) recordOutboundResponseSession(pctx *pipeline.Context) {
 		Identity:       snapshotIdentity(pctx),
 		StatusCode:     pctx.StatusCode,
 		Error:          deriveError(pctx),
-		Host:           pctx.Host,
-		TargetAudience: routeAudience(pctx),
-		Duration:       durationSince(pctx.StartedAt),
+		Host:     pctx.Host,
+		Duration: durationSince(pctx.StartedAt),
 	}
 	// Auth / Plugins alone qualify for recording; matches the widened
 	// gate in recordInboundSession so outbound denials and plugin-public
@@ -405,15 +404,6 @@ func snapshotIdentity(pctx *pipeline.Context) *pipeline.EventIdentity {
 		id.AgentID = pctx.Agent.WorkloadID
 	}
 	return id
-}
-
-// routeAudience returns the resolved OAuth audience for an outbound request,
-// or "" when no route matched (passthrough) or the event is inbound.
-func routeAudience(pctx *pipeline.Context) string {
-	if pctx.Route == nil || !pctx.Route.Matched {
-		return ""
-	}
-	return pctx.Route.Audience
 }
 
 // durationSince returns the elapsed time since StartedAt, or 0 when StartedAt
@@ -476,8 +466,7 @@ func (s *Server) recordOutboundSession(pctx *pipeline.Context) {
 		Invocations:    snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:        plugins,
 		Identity:       snapshotIdentity(pctx),
-		Host:           pctx.Host,
-		TargetAudience: routeAudience(pctx),
+		Host: pctx.Host,
 	}
 	if ev.MCP != nil || ev.Inference != nil || ev.Invocations != nil || plugins != nil {
 		s.Sessions.Append(sid, ev)

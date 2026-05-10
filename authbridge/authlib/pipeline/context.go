@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
 )
 
@@ -79,8 +78,7 @@ type Context struct {
 
 	Agent   *AgentIdentity
 	Claims  *validation.Claims // nil before jwt-validation runs
-	Route   *routing.ResolvedRoute
-	Session *SessionView // nil unless session tracking is enabled
+	Session *SessionView       // nil unless session tracking is enabled
 
 	// Response-phase fields (populated by listener before RunResponse).
 	// ResponseBody may be nil even during response phase if no plugin declared BodyAccess.
