@@ -71,6 +71,17 @@ func (e *A2AExtension) Fragments() []contracts.Fragment {
 // wire-level value verbatim); such callers hold a concrete
 // *A2AExtension and read .Role directly. Framework-generic consumers
 // should not do that.
+//
+// Conceptual home: this helper (and Fragments on A2AExtension) more
+// naturally belongs in the a2a-parser package — it's A2A-specific
+// logic that the framework itself has no stake in. It lives here
+// because Go requires methods on a type to be declared in the type's
+// own package, and A2AExtension lives in pipeline/ as a named slot
+// on Extensions. A planned protocols-registry refactor will move the
+// extension types into their parser packages (removing the named
+// slots on Extensions); this helper moves with A2AExtension at that
+// point. The equivalent move applies to MCPExtension.Fragments and
+// InferenceExtension.Fragments below.
 func normalizeA2ARole(r string) string {
 	switch r {
 	case "agent":
