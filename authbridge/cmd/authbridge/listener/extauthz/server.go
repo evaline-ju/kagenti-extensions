@@ -44,10 +44,12 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 		host = headers["host"]
 	}
 	path := httpReq.GetPath()
+	scheme := httpReq.GetScheme()
 
 	// Inbound validation via pipeline
 	inPctx := &pipeline.Context{
 		Direction: pipeline.Inbound,
+		Scheme:    scheme,
 		Host:      host,
 		Path:      path,
 		Headers:   mapToHTTPHeader(headers),
@@ -60,6 +62,7 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 	// Outbound exchange via pipeline
 	outPctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
+		Scheme:    scheme,
 		Host:      host,
 		Path:      path,
 		Headers:   mapToHTTPHeader(headers),

@@ -56,6 +56,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	pctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
+		Scheme:    r.URL.Scheme,
 		Host:      r.Host,
 		Path:      r.URL.Path,
 		Headers:   r.Header.Clone(),

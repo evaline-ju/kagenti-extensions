@@ -385,3 +385,80 @@ func TestRecordInboundReject_SkipsWithoutInvocations(t *testing.T) {
 		t.Errorf("expected no event, got %+v", v)
 	}
 }
+
+// schemeCapturePlugin captures pctx.Scheme for the scheme-wiring
+// test below.
+type schemeCapturePlugin struct {
+	got string
+}
+
+func (p *schemeCapturePlugin) Name() string { return "scheme-capture" }
+func (p *schemeCapturePlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *schemeCapturePlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	p.got = pctx.Scheme
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *schemeCapturePlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestReverseProxy_SchemeFromTLS verifies that pctx.Scheme is derived
+// from r.TLS (presence = "https", absence = "http") rather than
+// r.URL.Scheme, which Go leaves empty for server-side requests.
+// httptest.NewServer is plaintext (TLS nil); NewTLSServer sets TLS so
+// "https" falls out.
+func TestReverseProxy_SchemeFromTLS(t *testing.T) {
+	// Backend that the reverse proxy forwards to. Scheme on backend is
+	// irrelevant here — we're asserting on pctx.Scheme at the listener
+	// entry, which reflects the caller→proxy leg, not the proxy→backend
+	// leg.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	tests := []struct {
+		name   string
+		useTLS bool
+		want   string
+	}{
+		{name: "plaintext_inbound", useTLS: false, want: "http"},
+		{name: "tls_inbound", useTLS: true, want: "https"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			capturer := &schemeCapturePlugin{}
+			p, err := pipeline.New([]pipeline.Plugin{capturer})
+			if err != nil {
+				t.Fatalf("pipeline.New: %v", err)
+			}
+			srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL)
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+
+			var proxy *httptest.Server
+			var client *http.Client
+			if tc.useTLS {
+				proxy = httptest.NewTLSServer(srv.Handler())
+				client = proxy.Client() // trusts the test cert
+			} else {
+				proxy = httptest.NewServer(srv.Handler())
+				client = http.DefaultClient
+			}
+			defer proxy.Close()
+
+			resp, err := client.Get(proxy.URL + "/api")
+			if err != nil {
+				t.Fatalf("client.Get: %v", err)
+			}
+			resp.Body.Close()
+
+			if capturer.got != tc.want {
+				t.Errorf("pctx.Scheme = %q, want %q", capturer.got, tc.want)
+			}
+		})
+	}
+}

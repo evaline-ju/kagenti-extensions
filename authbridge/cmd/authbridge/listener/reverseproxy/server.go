@@ -75,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	pctx := &pipeline.Context{
 		Direction: pipeline.Inbound,
+		Scheme:    requestScheme(r),
 		Host:      r.Host,
 		Path:      r.URL.Path,
 		Headers:   r.Header.Clone(),
@@ -232,6 +233,22 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 
 // writeRejection renders a pipeline Reject to the http.ResponseWriter,
 // preserving the plugin's status, headers, and body.
+// requestScheme derives the URL scheme for an incoming server-side
+// request. On server requests Go does not populate r.URL.Scheme (it's
+// only set for client-side / proxy requests where the full URL is on
+// the request line), so we read it from r.TLS instead: TLS present =>
+// https, absent => http.
+//
+// Does not consult X-Forwarded-Proto. Honoring that header is only
+// safe when the upstream proxy is trusted; wiring a trust policy is
+// deferred until we have a concrete multi-hop deployment story.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
 func writeRejection(w http.ResponseWriter, action pipeline.Action) {
 	status, headers, body := action.Violation.Render()
 	for k, vs := range headers {
