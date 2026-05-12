@@ -16,13 +16,13 @@ import (
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 )
 
 // mockStream implements ExternalProcessor_ProcessServer for testing.
@@ -1331,7 +1331,7 @@ func TestRecordOutboundReject_EmitsDeniedPhase(t *testing.T) {
 	// Seed an active session so ActiveSession() returns it instead of
 	// empty — mirrors the real request flow (inbound recorded first).
 	store.Append("sess-active", pipeline.SessionEvent{
-		At: time.Now().Add(-50 * time.Millisecond),
+		At:        time.Now().Add(-50 * time.Millisecond),
 		Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
 		A2A: &pipeline.A2AExtension{Method: "message/send", SessionID: "sess-active"},
 	})
@@ -1485,4 +1485,89 @@ func keysOf(m map[string]json.RawMessage) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// schemeCapturePlugin captures the pctx.Scheme value it sees on
+// OnRequest. Used by the per-listener scheme-wiring tests to verify
+// each listener populates the field from its transport-native source.
+//
+// Duplicated byte-for-byte across the four listener test packages
+// (extauthz, extproc, forwardproxy, reverseproxy) rather than
+// promoted to authlib/plugintesting — the plugin shape is only
+// useful in listener tests and not worth exporting. Each package
+// has a copy with this same godoc.
+type schemeCapturePlugin struct {
+	got string
+}
+
+func (p *schemeCapturePlugin) Name() string { return "scheme-capture" }
+func (p *schemeCapturePlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *schemeCapturePlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	p.got = pctx.Scheme
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *schemeCapturePlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestExtProc_PopulatesSchemeFromPseudoHeader verifies that each pctx
+// construction path in the ext_proc listener (inbound + outbound,
+// headers-only + body) reads the :scheme pseudo-header and surfaces
+// it on pctx.Scheme. Plugins composing target URLs or branching on
+// transport depend on this being populated unconditionally.
+func TestExtProc_PopulatesSchemeFromPseudoHeader(t *testing.T) {
+	tests := []struct {
+		name      string
+		direction string
+		scheme    string
+		want      string
+	}{
+		{name: "inbound_http", direction: "inbound", scheme: "http", want: "http"},
+		{name: "inbound_https", direction: "inbound", scheme: "https", want: "https"},
+		{name: "outbound_http", direction: "outbound", scheme: "http", want: "http"},
+		{name: "outbound_https", direction: "outbound", scheme: "https", want: "https"},
+		{name: "missing_pseudo_header_is_empty", direction: "inbound", scheme: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			capturer := &schemeCapturePlugin{}
+			p, err := plugintesting.BuildPipeline([]pipeline.Plugin{capturer})
+			if err != nil {
+				t.Fatalf("BuildPipeline: %v", err)
+			}
+			srv := &Server{
+				InboundPipeline:  pipeline.NewHolder(p),
+				OutboundPipeline: pipeline.NewHolder(p),
+			}
+
+			hdrs := []string{
+				"x-authbridge-direction", tc.direction,
+				":path", "/x",
+				":authority", "agent.example",
+			}
+			if tc.scheme != "" {
+				hdrs = append(hdrs, ":scheme", tc.scheme)
+			}
+			// Use the direction-matching helper even though
+			// inboundRequest and outboundRequest share the same
+			// shape today — the test reads more clearly and guards
+			// against future drift if the helpers diverge.
+			reqFn := inboundRequest
+			if tc.direction == "outbound" {
+				reqFn = outboundRequest
+			}
+			stream := &mockStream{
+				ctx: context.Background(),
+				requests: []*extprocv3.ProcessingRequest{
+					reqFn(makeHeaders(hdrs...)),
+				},
+			}
+			_ = srv.Process(stream)
+			if capturer.got != tc.want {
+				t.Errorf("pctx.Scheme = %q, want %q", capturer.got, tc.want)
+			}
+		})
+	}
 }

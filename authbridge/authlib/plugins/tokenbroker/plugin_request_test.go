@@ -475,3 +475,52 @@ func TestTokenBroker_OnResponse(t *testing.T) {
 		t.Errorf("OnResponse() action.Type = %v, want %v", action.Type, pipeline.Continue)
 	}
 }
+
+// TestTokenBroker_ServerURL_SchemeAware verifies the serverURL sent
+// to the broker (via X-Server-Url) uses pctx.Scheme when populated.
+// Defaults to "http" when pctx.Scheme is empty — matches the
+// previous hardcoded behavior so existing callers upgrade without
+// surprise. See issue #397.
+func TestTokenBroker_ServerURL_SchemeAware(t *testing.T) {
+	tests := []struct {
+		name   string
+		scheme string
+		want   string
+	}{
+		{name: "scheme_https", scheme: "https", want: "https://api.example.com"},
+		{name: "scheme_http_explicit", scheme: "http", want: "http://api.example.com"},
+		{name: "scheme_empty_defaults_http", scheme: "", want: "http://api.example.com"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotServerURL string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotServerURL = r.Header.Get("X-Server-Url")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]string{"token": "x"})
+			}))
+			defer srv.Close()
+
+			p := NewTokenBroker()
+			cfg := `{"broker_url": "` + srv.URL + `", "default_policy": "broker"}`
+			if err := p.Configure(json.RawMessage(cfg)); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+
+			pctx := &pipeline.Context{
+				Scheme: tc.scheme,
+				Host:   "api.example.com",
+				Headers: http.Header{
+					"Authorization": []string{"Bearer user-token"},
+				},
+			}
+			if action := p.OnRequest(context.Background(), pctx); action.Type != pipeline.Continue {
+				t.Fatalf("OnRequest action = %v, want Continue", action.Type)
+			}
+			if gotServerURL != tc.want {
+				t.Errorf("X-Server-Url = %q, want %q", gotServerURL, tc.want)
+			}
+		})
+	}
+}

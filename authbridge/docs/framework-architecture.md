@@ -107,6 +107,7 @@ The entire surface a plugin sees:
 type Context struct {
     Direction Direction        // Inbound | Outbound
     Method    string           // HTTP method
+    Scheme    string           // "http" | "https" | ... ; empty when the listener can't determine it
     Host      string           // :authority / Host
     Path      string           // :path
     Headers   http.Header

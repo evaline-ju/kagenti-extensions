@@ -403,4 +403,66 @@ func TestRecordOutboundReject_SkipsWithoutInvocations(t *testing.T) {
 	if v := store.View(session.DefaultSessionID); v != nil {
 		t.Errorf("expected no event, got %+v", v)
 	}
-} 
+}
+
+// schemeCapturePlugin captures pctx.Scheme for the scheme-wiring
+// test below.
+type schemeCapturePlugin struct {
+	got string
+}
+
+func (p *schemeCapturePlugin) Name() string { return "scheme-capture" }
+func (p *schemeCapturePlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *schemeCapturePlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	p.got = pctx.Scheme
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *schemeCapturePlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestForwardProxy_PopulatesSchemeFromRequestURL verifies the
+// forward-proxy listener surfaces r.URL.Scheme on pctx. For HTTP
+// forward proxies the agent's request line carries the full URL
+// including scheme, so Go's net/http populates r.URL.Scheme
+// reliably.
+func TestForwardProxy_PopulatesSchemeFromRequestURL(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	capturer := &schemeCapturePlugin{}
+	// BuildPipeline is a thin wrapper over pipeline.New; using it
+	// across all four listener scheme tests keeps the construction
+	// one-liner identical and the tests grep-parallel.
+	p, err := plugintesting.BuildPipeline([]pipeline.Plugin{capturer})
+	if err != nil {
+		t.Fatalf("BuildPipeline: %v", err)
+	}
+	srv := &Server{OutboundPipeline: pipeline.NewHolder(p), Client: http.DefaultClient}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	// Use the backend's http:// URL so the proxy actually dials it.
+	// pctx.Scheme is observed BEFORE the outbound call, so the value
+	// we assert on is whatever r.URL.Scheme was when the pipeline
+	// ran, independent of whether the backend responds OK.
+	req, _ := http.NewRequest("GET", backend.URL+"/x", nil)
+	proxyClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxy.URL)),
+		},
+	}
+	resp, err := proxyClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if capturer.got != "http" {
+		t.Errorf("pctx.Scheme = %q, want http", capturer.got)
+	}
+}

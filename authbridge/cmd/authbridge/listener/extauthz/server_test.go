@@ -12,12 +12,12 @@ import (
 	"google.golang.org/grpc/codes"
 
 	authpkg "github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 )
 
 type mockVerifier struct {
@@ -149,5 +149,78 @@ func TestCheck_MissingHTTPAttributes(t *testing.T) {
 	denied := resp.GetDeniedResponse()
 	if denied == nil {
 		t.Fatal("expected DeniedResponse for missing attributes")
+	}
+}
+
+// schemeCapturePlugin records pctx.Scheme. Duplicated in each listener
+// test package because these are the smallest-unit Plugin types that
+// don't belong in authlib.
+type schemeCapturePlugin struct {
+	got string
+}
+
+func (p *schemeCapturePlugin) Name() string { return "scheme-capture" }
+func (p *schemeCapturePlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *schemeCapturePlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	p.got = pctx.Scheme
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *schemeCapturePlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestCheck_PopulatesSchemeFromAttribute verifies that both the
+// inbound and outbound pctx constructed by Check() read Scheme from
+// the CheckRequest's HTTP attribute, so plugins composing target
+// URLs or branching on transport see the right value in waypoint
+// mode.
+func TestCheck_PopulatesSchemeFromAttribute(t *testing.T) {
+	tests := []struct {
+		name   string
+		scheme string
+		want   string
+	}{
+		{name: "http", scheme: "http", want: "http"},
+		{name: "https", scheme: "https", want: "https"},
+		{name: "empty_passes_through", scheme: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inCap := &schemeCapturePlugin{}
+			outCap := &schemeCapturePlugin{}
+			in, err := plugintesting.BuildPipeline([]pipeline.Plugin{inCap})
+			if err != nil {
+				t.Fatalf("BuildPipeline inbound: %v", err)
+			}
+			out, err := plugintesting.BuildPipeline([]pipeline.Plugin{outCap})
+			if err != nil {
+				t.Fatalf("BuildPipeline outbound: %v", err)
+			}
+			srv := &Server{
+				InboundPipeline:  pipeline.NewHolder(in),
+				OutboundPipeline: pipeline.NewHolder(out),
+			}
+
+			req := &authv3.CheckRequest{
+				Attributes: &authv3.AttributeContext{
+					Request: &authv3.AttributeContext_Request{
+						Http: &authv3.AttributeContext_HttpRequest{
+							Scheme:  tc.scheme,
+							Headers: map[string]string{":authority": "agent.example"},
+							Path:    "/x",
+						},
+					},
+				},
+			}
+			_, _ = srv.Check(context.Background(), req)
+			if inCap.got != tc.want {
+				t.Errorf("inbound pctx.Scheme = %q, want %q", inCap.got, tc.want)
+			}
+			if outCap.got != tc.want {
+				t.Errorf("outbound pctx.Scheme = %q, want %q", outCap.got, tc.want)
+			}
+		})
 	}
 }

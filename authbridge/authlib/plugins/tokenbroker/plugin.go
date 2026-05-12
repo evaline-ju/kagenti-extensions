@@ -224,8 +224,16 @@ func (p *TokenBroker) OnRequest(ctx context.Context, pctx *pipeline.Context) pip
 			"broker route requires authorization token")
 	}
 
-	// Derive server URL from host
-	serverURL := "http://" + host
+	// Derive server URL from scheme + host. pctx.Scheme is populated
+	// by the listener from :scheme (ext_proc / ext_authz) or
+	// r.URL.Scheme / r.TLS (forward / reverse proxy). Defaults to
+	// "http" when the listener couldn't determine one — matches the
+	// previous hardcoded behavior.
+	scheme := pctx.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	serverURL := scheme + "://" + host
 
 	// Use the plugin's configured broker URL
 	brokerURL := p.cfg.BrokerURL

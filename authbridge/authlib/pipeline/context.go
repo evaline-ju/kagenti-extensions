@@ -82,10 +82,22 @@ func (d *Direction) UnmarshalJSON(data []byte) error {
 type Context struct {
 	Direction Direction
 	Method    string
-	Host      string
-	Path      string
-	Headers   http.Header
-	Body      []byte // nil unless at least one plugin declares BodyAccess: true
+	// Scheme is the URL scheme of the request, typically "http" or
+	// "https" — future transports ("ws" / "wss" / gRPC-specific
+	// schemes) pass through unchanged as free-form strings. Populated
+	// by the listener at pctx construction from the transport-native
+	// field: the :scheme pseudo-header in ext_proc and ext_authz,
+	// r.URL.Scheme in the forward and reverse proxies.
+	//
+	// Empty when the listener can't determine scheme (legacy test
+	// fixtures, an unrecognized transport, etc.). Plugins that need a
+	// concrete scheme should pick a default explicitly — treating ""
+	// as "assume http" would silently mask missing listener plumbing.
+	Scheme  string
+	Host    string
+	Path    string
+	Headers http.Header
+	Body    []byte // nil unless at least one plugin declares BodyAccess: true
 
 	// StartedAt is the wall-clock time this context was constructed by the
 	// listener at the start of a request. Used on the response path to
