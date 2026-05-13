@@ -23,7 +23,7 @@ type mockVerifier struct {
 	err    error
 }
 
-func (m *mockVerifier) Verify(_ context.Context, _ string, _ string) (*validation.Claims, error) {
+func (m *mockVerifier) Verify(_ context.Context, _ string, _ []string) (*validation.Claims, error) {
 	return m.claims, m.err
 }
 
