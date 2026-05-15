@@ -64,7 +64,7 @@ func (v *JWKSVerifier) Verify(ctx context.Context, tokenStr string, audiences []
 	}
 
 	if len(audiences) == 0 {
-		return nil, fmt.Errorf("audiences is required (prevents confused deputy attacks)")
+		return nil, fmt.Errorf("at least one expected audience is required (prevents confused deputy attacks)")
 	}
 
 	// Parse and validate JWT without audience check first

@@ -77,6 +77,13 @@ When `allowed_audiences` is non-empty, the default
 still omit `audience`, `audience_file`, and `allowed_audiences` entirely
 — i.e. you can run with **only** `allowed_audiences` for static mode.
 
+**Session / log migration:** jwt-validation deny-path `Details` used a
+single key `expected_audience` (string). It now emits
+`expected_audiences` (comma-joined list of configured inbound audiences)
+and `expected_audience_host` (waypoint per-request derived audience, may
+be empty). Update saved queries and dashboards that filtered on the old
+key.
+
 ## `on_error` policy
 
 > **Naming caveat.** Despite the name, `on_error` controls how the

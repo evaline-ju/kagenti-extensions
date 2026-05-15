@@ -27,11 +27,11 @@ const (
 
 // InboundResult is the outcome of inbound JWT validation.
 type InboundResult struct {
-	Action         string                // ActionAllow or ActionDeny
-	Claims         *validation.Claims    // non-nil when a valid JWT was present
-	DenyStatus     int                   // HTTP status code (e.g., 401)
-	DenyReason     string                // human-readable error — safe for logs, response bodies
-	DenyReasonCode InboundDenialReason    // machine-stable enum paired with the /stats counter; use for filtering / indexing session events
+	Action         string             // ActionAllow or ActionDeny
+	Claims         *validation.Claims // non-nil when a valid JWT was present
+	DenyStatus     int                // HTTP status code (e.g., 401)
+	DenyReason     string             // human-readable error — safe for logs, response bodies
+	DenyReasonCode InboundDenialReason // machine-stable enum paired with the /stats counter; use for filtering / indexing session events
 }
 
 // OutboundResult is the outcome of outbound token exchange.
