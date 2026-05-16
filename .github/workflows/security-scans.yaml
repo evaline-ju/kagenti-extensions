@@ -245,7 +245,7 @@ jobs:
           scan-type: 'config'
           scan-ref: '.'
           severity: 'CRITICAL,HIGH,MEDIUM'
-          skip-dirs: 'authbridge/demos,authbridge/authproxy/quickstart'
+          skip-dirs: 'authbridge/demos'
           exit-code: '0'
           format: 'table'
 

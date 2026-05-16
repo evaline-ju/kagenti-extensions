@@ -26,7 +26,7 @@ jobs:
           # set up traffic redirection. Proxy-sidecar mode does not
           # need this (HTTP_PROXY env var routing replaces iptables).
           - name: proxy-init
-            context: ./authbridge/authproxy
+            context: ./authbridge/proxy-init
             dockerfile: Dockerfile.init
 
           # AuthBridge envoy-sidecar combined image —
