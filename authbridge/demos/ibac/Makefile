@@ -18,7 +18,7 @@
 
 .PHONY: build-images build-authbridge load-images deploy undeploy \
         demo-no-ibac demo-ibac toggle-no-ibac toggle-ibac wait-pods \
-        port-forward stop-port-forward logs-agent logs-evil
+        ensure-deployed port-forward stop-port-forward logs-agent logs-evil
 
 KIND_CLUSTER_NAME ?= kagenti
 KIND_NODE         ?= $(KIND_CLUSTER_NAME)-control-plane
@@ -88,6 +88,17 @@ wait-pods:
 	kubectl -n $(NAMESPACE) wait --for=condition=Available --timeout=120s \
 	  deploy/ibac-email-server deploy/ibac-evil-server deploy/ibac-agent
 
+# ensure-deployed runs `make deploy` on the first toggle when the
+# namespace doesn't exist yet — first-time users (and anyone who's
+# just run `make undeploy`) shouldn't have to remember to run deploy
+# separately. If the namespace IS already there we skip — `make
+# deploy` is idempotent but the wait-pods step adds ~5s.
+ensure-deployed:
+	@if ! kubectl get namespace $(NAMESPACE) >/dev/null 2>&1; then \
+	  echo "[*] $(NAMESPACE) namespace not found — running 'make deploy' first"; \
+	  $(MAKE) deploy; \
+	fi
+
 undeploy:
 	kubectl delete namespace $(NAMESPACE) --ignore-not-found
 
@@ -139,7 +150,7 @@ toggle-ibac:
 # operator can SEE whether exfiltration succeeded.
 ATTACK_BODY := '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"Summarize my emails."}],"contextId":"demo-session-1"}}}'
 
-demo-no-ibac: toggle-no-ibac _attack
+demo-no-ibac: ensure-deployed toggle-no-ibac _attack
 	@echo
 	@echo "=============================================="
 	@echo " Result: WITHOUT IBAC"
@@ -150,7 +161,7 @@ demo-no-ibac: toggle-no-ibac _attack
 	@echo
 	@echo "If you see EXFILTRATED DATA RECEIVED above, the attack succeeded."
 
-demo-ibac: toggle-ibac _attack
+demo-ibac: ensure-deployed toggle-ibac _attack
 	@echo
 	@echo "=============================================="
 	@echo " Result: WITH IBAC"
