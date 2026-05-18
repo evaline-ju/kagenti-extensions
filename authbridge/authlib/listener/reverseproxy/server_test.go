@@ -23,7 +23,7 @@ type mockVerifier struct {
 	err    error
 }
 
-func (m *mockVerifier) Verify(_ context.Context, _ string, _ string) (*validation.Claims, error) {
+func (m *mockVerifier) Verify(_ context.Context, _ string, _ []string) (*validation.Claims, error) {
 	return m.claims, m.err
 }
 
@@ -45,7 +45,7 @@ func TestReverseProxy_AllowedRequest(t *testing.T) {
 
 	a := auth.New(auth.Config{
 		Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
-		Identity: auth.IdentityConfig{Audience: "my-app"},
+		Identity: auth.IdentityConfig{Audiences: []string{"my-app"}},
 	})
 	srv, err := NewServer(inboundPipelineFromAuth(t, a), nil, backend.URL)
 	if err != nil {
@@ -69,7 +69,7 @@ func TestReverseProxy_AllowedRequest(t *testing.T) {
 func TestReverseProxy_DeniedRequest(t *testing.T) {
 	a := auth.New(auth.Config{
 		Verifier: &mockVerifier{err: fmt.Errorf("invalid token")},
-		Identity: auth.IdentityConfig{Audience: "my-app"},
+		Identity: auth.IdentityConfig{Audiences: []string{"my-app"}},
 	})
 	srv, _ := NewServer(inboundPipelineFromAuth(t, a), nil, "http://localhost:9999")
 
@@ -276,7 +276,7 @@ func TestReverseProxy_BodyNotBuffered_WhenNotNeeded(t *testing.T) {
 
 	a := auth.New(auth.Config{
 		Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
-		Identity: auth.IdentityConfig{Audience: "test"},
+		Identity: auth.IdentityConfig{Audiences: []string{"test"}},
 	})
 	srv, err := NewServer(inboundPipelineFromAuth(t, a), nil, backend.URL)
 	if err != nil {

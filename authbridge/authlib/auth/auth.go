@@ -19,8 +19,9 @@ import (
 
 // IdentityConfig holds the agent's identity for audience validation and token exchange.
 type IdentityConfig struct {
-	ClientID string // agent's OAuth client ID
-	Audience string // expected inbound JWT audience (usually same as ClientID)
+	ClientID  string   // agent's OAuth client ID (used by token-exchange)
+	Audiences []string // expected inbound JWT audiences (jwt-validation); at least one required for static inbound validation
+	Issuer    string   // expected JWT iss (jwt-validation); inbound debug logging only
 }
 
 // ActorTokenSource provides actor tokens for RFC 8693 Section 4.1 act claim chaining.
@@ -259,10 +260,22 @@ func (a *Auth) UpdateIdentity(id IdentityConfig, clientAuth exchange.ClientAuth)
 	a.log.Info("identity updated", "client_id", id.ClientID)
 }
 
-// Ready returns true if the identity has been loaded (audience is non-empty).
+// Ready returns true if inbound expected audiences have been loaded.
 func (a *Auth) Ready() bool {
 	id := a.identity.Load()
-	return id != nil && id.Audience != ""
+	return id != nil && len(id.Audiences) > 0
+}
+
+// InboundAudiences returns a copy of the configured expected audiences
+// for inbound JWT validation (may be empty before credentials load).
+func (a *Auth) InboundAudiences() []string {
+	id := a.identity.Load()
+	if id == nil || len(id.Audiences) == 0 {
+		return nil
+	}
+	out := make([]string, len(id.Audiences))
+	copy(out, id.Audiences)
+	return out
 }
 
 // HandleInbound validates an inbound request's JWT token.
@@ -310,10 +323,16 @@ func (a *Auth) HandleInbound(ctx context.Context, authHeader, path, audience str
 			DenyReasonCode: DENY_VALIDATOR_MISSING,
 		}
 	}
-	if audience == "" {
-		audience = a.identity.Load().Audience
+	var audiences []string
+	if audience != "" {
+		audiences = []string{audience} // waypoint mode: single derived audience
+	} else {
+		id := a.identity.Load()
+		if id != nil {
+			audiences = id.Audiences
+		}
 	}
-	if audience == "" {
+	if len(audiences) == 0 {
 		return &InboundResult{
 			Action:         ActionDeny,
 			DenyStatus:     http.StatusServiceUnavailable,
@@ -321,17 +340,21 @@ func (a *Auth) HandleInbound(ctx context.Context, authHeader, path, audience str
 			DenyReasonCode: DENY_VALIDATOR_MISSING,
 		}
 	}
-	a.log.Debug("validating inbound JWT", "path", path, "expectedAudience", audience)
-	claims, err := a.verifier.Verify(ctx, token, audience)
+	a.log.Debug("validating inbound JWT", "path", path, "expectedAudiences", audiences)
+	claims, err := a.verifier.Verify(ctx, token, audiences)
 	if err != nil {
 		// Log full error at Info; log detailed context at Debug.
 		// Generic message returned to client to avoid leaking details.
 		a.IncInboundDeny(DENY_JWT_FAILED)
 		a.log.Info("JWT validation failed", "error", err)
+		var expectedIssuer string
+		if id := a.identity.Load(); id != nil {
+			expectedIssuer = id.Issuer
+		}
 		a.log.Debug("JWT validation details",
 			"path", path,
-			"expectedAudience", audience,
-			"expectedIssuer", a.identity.Load().Audience,
+			"expectedAudiences", audiences,
+			"expectedIssuer", expectedIssuer,
 			"error", err)
 		return &InboundResult{
 			Action:         ActionDeny,

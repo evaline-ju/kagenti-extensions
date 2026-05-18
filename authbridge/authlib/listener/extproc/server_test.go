@@ -58,7 +58,7 @@ type mockVerifier struct {
 	err    error
 }
 
-func (v *mockVerifier) Verify(_ context.Context, _ string, _ string) (*validation.Claims, error) {
+func (v *mockVerifier) Verify(_ context.Context, _ string, _ []string) (*validation.Claims, error) {
 	return v.claims, v.err
 }
 
@@ -128,7 +128,7 @@ func outboundRequest(headers *corev3.HeaderMap) *extprocv3.ProcessingRequest {
 func TestExtProc_Inbound_ValidJWT(t *testing.T) {
 	a := auth.New(auth.Config{
 		Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user-1"}},
-		Identity: auth.IdentityConfig{Audience: "my-agent"},
+		Identity: auth.IdentityConfig{Audiences: []string{"my-agent"}},
 	})
 	srv := serverFromAuth(t, a)
 
@@ -172,7 +172,7 @@ func TestExtProc_Inbound_ValidJWT(t *testing.T) {
 func TestExtProc_Inbound_InvalidJWT(t *testing.T) {
 	a := auth.New(auth.Config{
 		Verifier: &mockVerifier{err: fmt.Errorf("token expired")},
-		Identity: auth.IdentityConfig{Audience: "my-agent"},
+		Identity: auth.IdentityConfig{Audiences: []string{"my-agent"}},
 	})
 	srv := serverFromAuth(t, a)
 
@@ -555,13 +555,12 @@ func TestExtProc_BodyBuffering_Outbound(t *testing.T) {
 	inbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{
 		plugintesting.NewJWTValidation(auth.New(auth.Config{
 			Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
-			Identity: auth.IdentityConfig{Audience: "test"},
+			Identity: auth.IdentityConfig{Audiences: []string{"test"}},
 		}), false),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	srv := &Server{InboundPipeline: pipeline.NewHolder(inbound), OutboundPipeline: pipeline.NewHolder(p)}
 
 	body := []byte(`{"key":"value"}`)
@@ -651,7 +650,7 @@ func TestExtProc_BodyTooLarge(t *testing.T) {
 func TestExtProc_NoBodyBuffering_WhenNotNeeded(t *testing.T) {
 	a := auth.New(auth.Config{
 		Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
-		Identity: auth.IdentityConfig{Audience: "my-agent"},
+		Identity: auth.IdentityConfig{Audiences: []string{"my-agent"}},
 	})
 	srv := serverFromAuth(t, a)
 

@@ -66,3 +66,4 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 test-jwt-rotation.sh
+kagenti-webhook/bin/

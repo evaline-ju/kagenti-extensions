@@ -21,13 +21,13 @@ import (
 )
 
 type mockVerifier struct {
-	claims       *validation.Claims
-	err          error
-	lastAudience string
+	claims        *validation.Claims
+	err           error
+	lastAudiences []string
 }
 
-func (m *mockVerifier) Verify(_ context.Context, _ string, audience string) (*validation.Claims, error) {
-	m.lastAudience = audience
+func (m *mockVerifier) Verify(_ context.Context, _ string, audiences []string) (*validation.Claims, error) {
+	m.lastAudiences = audiences
 	return m.claims, m.err
 }
 
@@ -93,7 +93,7 @@ func TestCheck_ValidToken_Exchange(t *testing.T) {
 		Router:    router,
 		Exchanger: exchanger,
 		Cache:     cache.New(),
-		Identity:  authpkg.IdentityConfig{Audience: "default-aud"},
+		Identity:  authpkg.IdentityConfig{Audiences: []string{"default-aud"}},
 	})
 	srv := serverFromAuth(t, a)
 
@@ -104,8 +104,8 @@ func TestCheck_ValidToken_Exchange(t *testing.T) {
 	}
 
 	// Audience should be derived from host
-	if mv.lastAudience != "auth-target-service" {
-		t.Errorf("audience = %q, want auth-target-service", mv.lastAudience)
+	if len(mv.lastAudiences) != 1 || mv.lastAudiences[0] != "auth-target-service" {
+		t.Errorf("audiences = %v, want [auth-target-service]", mv.lastAudiences)
 	}
 
 	// Should be OK with token replacement
@@ -124,7 +124,7 @@ func TestCheck_ValidToken_Exchange(t *testing.T) {
 func TestCheck_InvalidToken(t *testing.T) {
 	a := authpkg.New(authpkg.Config{
 		Verifier: &mockVerifier{err: fmt.Errorf("bad token")},
-		Identity: authpkg.IdentityConfig{Audience: "aud"},
+		Identity: authpkg.IdentityConfig{Audiences: []string{"aud"}},
 	})
 	srv := serverFromAuth(t, a)
 

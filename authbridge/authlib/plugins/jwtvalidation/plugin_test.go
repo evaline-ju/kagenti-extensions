@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
@@ -214,7 +215,7 @@ type mockJWTVerifier struct {
 	err    error
 }
 
-func (m *mockJWTVerifier) Verify(_ context.Context, _, _ string) (*validation.Claims, error) {
+func (m *mockJWTVerifier) Verify(_ context.Context, _ string, audiences []string) (*validation.Claims, error) {
 	return m.claims, m.err
 }
 
@@ -233,7 +234,7 @@ func TestJWTValidation_OnRequest_PopulatesAuth_Bypass(t *testing.T) {
 	inner := auth.New(auth.Config{
 		Bypass:   matcher,
 		Verifier: &mockJWTVerifier{claims: &validation.Claims{Subject: "s"}},
-		Identity: auth.IdentityConfig{Audience: "agent-aud"},
+		Identity: auth.IdentityConfig{Audiences: []string{"agent-aud"}},
 	})
 	p := newTestJWTValidation(t, "http://issuer", inner)
 
@@ -257,7 +258,7 @@ func TestJWTValidation_OnRequest_PopulatesAuth_Bypass(t *testing.T) {
 func TestJWTValidation_OnRequest_PopulatesAuth_Deny_NoHeader(t *testing.T) {
 	inner := auth.New(auth.Config{
 		Verifier: &mockJWTVerifier{},
-		Identity: auth.IdentityConfig{Audience: "agent-aud"},
+		Identity: auth.IdentityConfig{Audiences: []string{"agent-aud"}},
 	})
 	p := newTestJWTValidation(t, "http://issuer.example", inner)
 
@@ -279,6 +280,9 @@ func TestJWTValidation_OnRequest_PopulatesAuth_Deny_NoHeader(t *testing.T) {
 	if got.Details["expected_issuer"] != "http://issuer.example" {
 		t.Errorf("expected_issuer = %q, want http://issuer.example", got.Details["expected_issuer"])
 	}
+	if g, want := got.Details["expected_audiences"], "agent-aud"; g != want {
+		t.Errorf("expected_audiences = %q, want %q", g, want)
+	}
 }
 
 func TestJWTValidation_OnRequest_PopulatesAuth_Allow(t *testing.T) {
@@ -291,7 +295,7 @@ func TestJWTValidation_OnRequest_PopulatesAuth_Allow(t *testing.T) {
 	}
 	inner := auth.New(auth.Config{
 		Verifier: &mockJWTVerifier{claims: claims},
-		Identity: auth.IdentityConfig{Audience: "agent-aud"},
+		Identity: auth.IdentityConfig{Audiences: []string{"agent-aud"}},
 	})
 	p := newTestJWTValidation(t, "http://issuer.example", inner)
 
@@ -334,7 +338,7 @@ func TestJWTValidation_OnRequest_MultiAudience_CommaJoined(t *testing.T) {
 	}
 	inner := auth.New(auth.Config{
 		Verifier: &mockJWTVerifier{claims: claims},
-		Identity: auth.IdentityConfig{Audience: "aud-a"},
+		Identity: auth.IdentityConfig{Audiences: []string{"aud-a"}},
 	})
 	p := newTestJWTValidation(t, "http://issuer.example", inner)
 
@@ -356,5 +360,34 @@ func TestJWTValidation_OnRequest_MultiAudience_CommaJoined(t *testing.T) {
 	// must coexist in the same record.
 	if got.Details["token_scopes"] != "openid write" {
 		t.Errorf("token_scopes = %q, want %q", got.Details["token_scopes"], "openid write")
+	}
+}
+
+func TestJWTValidation_Configure_AllowedAudiencesOnly(t *testing.T) {
+	p := NewJWTValidation()
+	raw := []byte(`{"issuer":"http://kc/realms/x","allowed_audiences":["playground","account"]}`)
+	if err := p.Configure(raw); err != nil {
+		t.Fatal(err)
+	}
+	if p.cfg.AudienceFile != "" {
+		t.Errorf("AudienceFile = %q, want empty when allowed_audiences supplies static audiences", p.cfg.AudienceFile)
+	}
+	got := p.inner.InboundAudiences()
+	want := []string{"playground", "account"}
+	if !slices.Equal(got, want) {
+		t.Errorf("InboundAudiences() = %#v, want %#v", got, want)
+	}
+}
+
+func TestJWTValidation_Configure_AllowedAudiencesUnionsLiteral(t *testing.T) {
+	p := NewJWTValidation()
+	raw := []byte(`{"issuer":"http://kc/realms/x","audience":"spi-like-id","allowed_audiences":["public-ui"]}`)
+	if err := p.Configure(raw); err != nil {
+		t.Fatal(err)
+	}
+	got := p.inner.InboundAudiences()
+	want := []string{"public-ui", "spi-like-id"}
+	if !slices.Equal(got, want) {
+		t.Errorf("InboundAudiences() = %#v, want %#v", got, want)
 	}
 }

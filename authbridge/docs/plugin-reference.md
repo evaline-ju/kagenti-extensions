@@ -56,6 +56,34 @@ pipeline:
   The framework does not interpret it; it's captured as `json.RawMessage`
   and handed to `Configure`.
 
+### `jwt-validation`: `allowed_audiences` (optional, transitional)
+
+The `jwt-validation` plugin accepts an optional JSON array field
+`allowed_audiences` (YAML under `config:`). Each entry is an additional
+**expected** inbound JWT `aud` value. The plugin **union**s these with
+the primary audience from `audience` / `audience_file` (deduplicated,
+order preserved). Inbound verification succeeds if the token's `aud`
+claim (RFC 7519 — string **or** array) contains **any** configured value.
+
+Use this as a **short-term bridge** when legitimate tokens carry
+multiple audiences (for example a public UI client plus `account`) and
+the workload must accept more than the SPIFFE / client ID read from
+`audience_file` alone. Prefer aligning IdP audience policy and
+application token exchange long-term; see team design discussions linked
+from release notes.
+
+When `allowed_audiences` is non-empty, the default
+`/shared/client-id.txt` `audience_file` is **not** auto-added unless you
+still omit `audience`, `audience_file`, and `allowed_audiences` entirely
+— i.e. you can run with **only** `allowed_audiences` for static mode.
+
+**Session / log migration:** jwt-validation deny-path `Details` used a
+single key `expected_audience` (string). It now emits
+`expected_audiences` (comma-joined list of configured inbound audiences)
+and `expected_audience_host` (waypoint per-request derived audience, may
+be empty). Update saved queries and dashboards that filtered on the old
+key.
+
 ## `on_error` policy
 
 > **Naming caveat.** Despite the name, `on_error` controls how the
@@ -579,8 +607,10 @@ Suggested key conventions used by built-in plugins (operators
 already know these; abctl filters match substring on both key and
 value):
 
-- Auth gates (jwt-validation): `expected_issuer`, `expected_audience`,
-  `token_subject`, `token_audience`, `token_scopes`.
+- Auth gates (jwt-validation): `expected_issuer`, `expected_audiences`
+  (comma-joined configured inbound audiences), `expected_audience_host`
+  (waypoint per-request derived audience, may be empty), `token_subject`,
+  `token_audience`, `token_scopes`.
 - Outbound routers (token-exchange): `route_matched` (`"true"`/`"false"`),
   `route_host`, `target_audience`, `requested_scopes`, `cache_hit`.
 - Parsers: usually no Details — their semantic payload lives on the

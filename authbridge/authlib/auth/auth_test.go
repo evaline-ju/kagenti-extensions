@@ -17,15 +17,15 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 )
 
-// mockVerifier captures the audience arg and returns configured claims/error.
+// mockVerifier captures the audiences arg and returns configured claims/error.
 type mockVerifier struct {
-	claims       *validation.Claims
-	err          error
-	lastAudience string
+	claims        *validation.Claims
+	err           error
+	lastAudiences []string
 }
 
-func (m *mockVerifier) Verify(_ context.Context, _ string, audience string) (*validation.Claims, error) {
-	m.lastAudience = audience
+func (m *mockVerifier) Verify(_ context.Context, _ string, audiences []string) (*validation.Claims, error) {
+	m.lastAudiences = audiences
 	return m.claims, m.err
 }
 
@@ -69,7 +69,7 @@ func TestHandleInbound_InvalidFormat(t *testing.T) {
 func TestHandleInbound_CaseInsensitiveBearer(t *testing.T) {
 	a := New(Config{
 		Verifier: &mockVerifier{claims: validClaims()},
-		Identity: IdentityConfig{Audience: "my-agent"},
+		Identity: IdentityConfig{Audiences: []string{"my-agent"}},
 	})
 	// RFC 7235: auth scheme is case-insensitive
 	for _, header := range []string{"Bearer token", "bearer token", "BEARER token", "beArer token"} {
@@ -83,7 +83,7 @@ func TestHandleInbound_CaseInsensitiveBearer(t *testing.T) {
 func TestHandleInbound_ValidJWT(t *testing.T) {
 	a := New(Config{
 		Verifier: &mockVerifier{claims: validClaims()},
-		Identity: IdentityConfig{Audience: "my-agent"},
+		Identity: IdentityConfig{Audiences: []string{"my-agent"}},
 	})
 	result := a.HandleInbound(context.Background(), "Bearer valid-token", "/api/test", "")
 	if result.Action != ActionAllow {
@@ -97,7 +97,7 @@ func TestHandleInbound_ValidJWT(t *testing.T) {
 func TestHandleInbound_InvalidJWT(t *testing.T) {
 	a := New(Config{
 		Verifier: &mockVerifier{err: fmt.Errorf("token expired")},
-		Identity: IdentityConfig{Audience: "my-agent"},
+		Identity: IdentityConfig{Audiences: []string{"my-agent"}},
 	})
 	result := a.HandleInbound(context.Background(), "Bearer expired-token", "/api/test", "")
 	if result.Action != ActionDeny || result.DenyStatus != http.StatusUnauthorized {
@@ -148,7 +148,7 @@ func TestHandleInbound_PopulatesDenyReasonCode(t *testing.T) {
 			name: "jwt failed",
 			cfg: Config{
 				Verifier: &mockVerifier{err: fmt.Errorf("bad signature")},
-				Identity: IdentityConfig{Audience: "aud"},
+				Identity: IdentityConfig{Audiences: []string{"aud"}},
 			},
 			authHeader: "Bearer tok",
 			want:       DENY_JWT_FAILED,
@@ -175,19 +175,19 @@ func TestHandleInbound_AudienceOverride(t *testing.T) {
 	mv := &mockVerifier{claims: validClaims()}
 	a := New(Config{
 		Verifier: mv,
-		Identity: IdentityConfig{Audience: "default-aud"},
+		Identity: IdentityConfig{Audiences: []string{"default-aud"}},
 	})
 
-	// Empty audience uses default
+	// Empty audience uses configured defaults
 	a.HandleInbound(context.Background(), "Bearer t", "/api", "")
-	if mv.lastAudience != "default-aud" {
-		t.Errorf("expected default-aud, got %q", mv.lastAudience)
+	if len(mv.lastAudiences) != 1 || mv.lastAudiences[0] != "default-aud" {
+		t.Errorf("expected [default-aud], got %v", mv.lastAudiences)
 	}
 
 	// Explicit audience overrides default (waypoint mode)
 	a.HandleInbound(context.Background(), "Bearer t", "/api", "derived-from-host")
-	if mv.lastAudience != "derived-from-host" {
-		t.Errorf("expected derived-from-host, got %q", mv.lastAudience)
+	if len(mv.lastAudiences) != 1 || mv.lastAudiences[0] != "derived-from-host" {
+		t.Errorf("expected [derived-from-host], got %v", mv.lastAudiences)
 	}
 }
 
@@ -814,7 +814,7 @@ func TestHandleInbound_IncrementsStats(t *testing.T) {
 	a := New(Config{
 		Bypass:   m,
 		Verifier: &mockVerifier{claims: validClaims()},
-		Identity: IdentityConfig{Audience: "my-agent"},
+		Identity: IdentityConfig{Audiences: []string{"my-agent"}},
 	})
 
 	a.HandleInbound(context.Background(), "", "/healthz", "")
@@ -848,7 +848,7 @@ func TestHandleInbound_NoVerifier_IncrementsStats(t *testing.T) {
 func TestHandleInbound_JWTFailed_IncrementsStats(t *testing.T) {
 	a := New(Config{
 		Verifier: &mockVerifier{err: fmt.Errorf("bad token")},
-		Identity: IdentityConfig{Audience: "aud"},
+		Identity: IdentityConfig{Audiences: []string{"aud"}},
 	})
 	a.HandleInbound(context.Background(), "Bearer bad", "/api", "")
 

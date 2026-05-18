@@ -109,7 +109,7 @@ func TestJWKSVerifier_ValidToken(t *testing.T) {
 		"iat": time.Now().Unix(),
 	})
 
-	claims, err := v.Verify(ctx, token, "my-agent")
+	claims, err := v.Verify(ctx, token, []string{"my-agent"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestJWKSVerifier_ExpiredToken(t *testing.T) {
 		"iat": time.Now().Add(-5 * time.Minute).Unix(),
 	})
 
-	_, err := v.Verify(ctx, token, "my-agent")
+	_, err := v.Verify(ctx, token, []string{"my-agent"})
 	if err == nil {
 		t.Fatal("expected error for expired token")
 	}
@@ -160,7 +160,7 @@ func TestJWKSVerifier_WrongIssuer(t *testing.T) {
 		"iat": time.Now().Unix(),
 	})
 
-	_, err := v.Verify(ctx, token, "my-agent")
+	_, err := v.Verify(ctx, token, []string{"my-agent"})
 	if err == nil {
 		t.Fatal("expected error for wrong issuer")
 	}
@@ -181,7 +181,7 @@ func TestJWKSVerifier_WrongAudience(t *testing.T) {
 		"iat": time.Now().Unix(),
 	})
 
-	_, err := v.Verify(ctx, token, "my-agent")
+	_, err := v.Verify(ctx, token, []string{"my-agent"})
 	if err == nil {
 		t.Fatal("expected error for wrong audience")
 	}
@@ -202,9 +202,9 @@ func TestJWKSVerifier_EmptyAudience_Rejected(t *testing.T) {
 		"iat": time.Now().Unix(),
 	})
 
-	_, err := v.Verify(ctx, token, "")
+	_, err := v.Verify(ctx, token, nil)
 	if err == nil {
-		t.Fatal("expected error for empty audience (confused deputy protection)")
+		t.Fatal("expected error for empty audiences (confused deputy protection)")
 	}
 }
 
@@ -226,8 +226,86 @@ func TestJWKSVerifier_InvalidSignature(t *testing.T) {
 		"iat": time.Now().Unix(),
 	})
 
-	_, err := v.Verify(ctx, token, "my-agent")
+	_, err := v.Verify(ctx, token, []string{"my-agent"})
 	if err == nil {
 		t.Fatal("expected error for invalid signature")
+	}
+}
+
+func TestJWKSVerifier_MultiAudience_MatchSecond(t *testing.T) {
+	privKey, jwksSrv := setupTestJWKS(t)
+	defer jwksSrv.Close()
+
+	ctx := context.Background()
+	v, err := NewJWKSVerifier(ctx, jwksSrv.URL, "http://test-issuer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Token has multiple audiences; expected audience matches the second one
+	token := signToken(t, privKey, map[string]interface{}{
+		"iss": "http://test-issuer",
+		"aud": []string{"other-service", "my-agent"},
+		"sub": "user-123",
+		"exp": time.Now().Add(5 * time.Minute).Unix(),
+		"iat": time.Now().Unix(),
+	})
+
+	claims, err := v.Verify(ctx, token, []string{"my-agent"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claims.HasAudience("my-agent") {
+		t.Error("expected audience my-agent")
+	}
+}
+
+func TestJWKSVerifier_MultiExpectedAudiences_OneMatches(t *testing.T) {
+	privKey, jwksSrv := setupTestJWKS(t)
+	defer jwksSrv.Close()
+
+	ctx := context.Background()
+	v, err := NewJWKSVerifier(ctx, jwksSrv.URL, "http://test-issuer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Token has audiences that overlap with the second expected audience
+	token := signToken(t, privKey, map[string]interface{}{
+		"iss": "http://test-issuer",
+		"aud": []string{"other", "my-agent"},
+		"sub": "user-123",
+		"exp": time.Now().Add(5 * time.Minute).Unix(),
+		"iat": time.Now().Unix(),
+	})
+
+	claims, err := v.Verify(ctx, token, []string{"no-match", "my-agent"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claims.HasAudience("my-agent") {
+		t.Error("expected audience my-agent")
+	}
+}
+
+func TestJWKSVerifier_MultiExpectedAudiences_NoneMatch(t *testing.T) {
+	privKey, jwksSrv := setupTestJWKS(t)
+	defer jwksSrv.Close()
+
+	ctx := context.Background()
+	v, _ := NewJWKSVerifier(ctx, jwksSrv.URL, "http://test-issuer")
+
+	// Token audience doesn't match any of the expected audiences
+	token := signToken(t, privKey, map[string]interface{}{
+		"iss": "http://test-issuer",
+		"aud": []string{"unrelated-service", "another-service"},
+		"sub": "user",
+		"exp": time.Now().Add(5 * time.Minute).Unix(),
+		"iat": time.Now().Unix(),
+	})
+
+	_, err := v.Verify(ctx, token, []string{"aud1", "aud2"})
+	if err == nil {
+		t.Fatal("expected error when no expected audience matches token audiences")
 	}
 }

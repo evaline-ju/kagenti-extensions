@@ -197,7 +197,7 @@ type TokenExchange struct {
 	// ready flips true when credentials are available — either because
 	// the synchronous read in Configure succeeded, because the operator
 	// supplied inline credentials, or because pollCredentials finished.
-	// auth.Auth.Ready() checks Identity.Audience which token-exchange
+	// auth.Auth.Ready() checks Identity.Audiences which token-exchange
 	// doesn't set (it uses ClientID), so we track readiness locally.
 	ready atomic.Bool
 }

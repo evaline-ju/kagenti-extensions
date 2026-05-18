@@ -9,9 +9,10 @@ import (
 // Verifier validates JWT tokens.
 type Verifier interface {
 	// Verify parses and validates a JWT token string.
-	// audience is a required parameter to prevent confused deputy attacks.
+	// audiences must contain at least one expected audience (prevents confused deputy attacks).
+	// The token is accepted if its aud claim contains any of the expected audiences.
 	// Returns claims on success or an error describing the validation failure.
-	Verify(ctx context.Context, tokenStr string, audience string) (*Claims, error)
+	Verify(ctx context.Context, tokenStr string, audiences []string) (*Claims, error)
 }
 
 // Claims contains the validated claims extracted from a JWT.

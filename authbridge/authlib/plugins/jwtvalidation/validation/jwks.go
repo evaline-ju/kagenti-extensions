@@ -12,9 +12,9 @@ import (
 
 // JWKSVerifier validates JWTs using a JWKS endpoint with auto-refreshing key cache.
 type JWKSVerifier struct {
-	jwksURL  string
-	issuer   string
-	cache    *jwk.Cache
+	jwksURL string
+	issuer  string
+	cache   *jwk.Cache
 }
 
 // JWKSOption configures JWKSVerifier behavior.
@@ -56,26 +56,33 @@ func NewJWKSVerifier(ctx context.Context, jwksURL, issuer string, opts ...JWKSOp
 
 // Verify parses and validates a JWT token against the cached JWKS.
 // Checks signature, expiration, issuer, and audience.
-func (v *JWKSVerifier) Verify(ctx context.Context, tokenStr string, audience string) (*Claims, error) {
+// The token is accepted if its aud claim contains any of the expected audiences.
+func (v *JWKSVerifier) Verify(ctx context.Context, tokenStr string, audiences []string) (*Claims, error) {
 	keySet, err := v.cache.Get(ctx, v.jwksURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetching JWKS: %w", err)
 	}
 
-	if audience == "" {
-		return nil, fmt.Errorf("audience is required (prevents confused deputy attacks)")
+	if len(audiences) == 0 {
+		return nil, fmt.Errorf("at least one expected audience is required (prevents confused deputy attacks)")
 	}
 
+	// Parse and validate JWT without audience check first
+	// (we'll validate audience manually to handle both string and array)
 	parseOpts := []jwt.ParseOption{
 		jwt.WithKeySet(keySet),
 		jwt.WithValidate(true),
 		jwt.WithIssuer(v.issuer),
-		jwt.WithAudience(audience),
 	}
 
 	token, err := jwt.Parse([]byte(tokenStr), parseOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("validating JWT: %w", err)
+	}
+
+	// Manually validate audience: token must contain at least one expected audience
+	if !audienceMatches(token.Audience(), audiences) {
+		return nil, fmt.Errorf("validating JWT: none of expected audiences %v found in token audiences %v", audiences, token.Audience())
 	}
 
 	claims := &Claims{
@@ -108,4 +115,16 @@ func (v *JWKSVerifier) Verify(ctx context.Context, tokenStr string, audience str
 	}
 
 	return claims, nil
+}
+
+// audienceMatches checks if any of the expected audiences is present in the token's audience claim.
+func audienceMatches(tokenAudiences []string, expectedAudiences []string) bool {
+	for _, expected := range expectedAudiences {
+		for _, actual := range tokenAudiences {
+			if actual == expected {
+				return true
+			}
+		}
+	}
+	return false
 }

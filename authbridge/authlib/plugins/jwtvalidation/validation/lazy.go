@@ -34,7 +34,7 @@ func NewLazyJWKSVerifier(jwksURL, issuer string, opts ...JWKSOption) *LazyJWKSVe
 
 // Verify initializes the underlying JWKSVerifier on first call, then delegates.
 // If initialization fails, it retries on the next call rather than caching the error.
-func (v *LazyJWKSVerifier) Verify(ctx context.Context, tokenStr string, audience string) (*Claims, error) {
+func (v *LazyJWKSVerifier) Verify(ctx context.Context, tokenStr string, audiences []string) (*Claims, error) {
 	v.mu.Lock()
 	if v.inner == nil {
 		inner, err := NewJWKSVerifier(ctx, v.jwksURL, v.issuer, v.opts...)
@@ -47,5 +47,5 @@ func (v *LazyJWKSVerifier) Verify(ctx context.Context, tokenStr string, audience
 	inner := v.inner
 	v.mu.Unlock()
 
-	return inner.Verify(ctx, tokenStr, audience)
+	return inner.Verify(ctx, tokenStr, audiences)
 }

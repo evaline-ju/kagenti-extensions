@@ -61,10 +61,9 @@ type jwtValidationConfig struct {
 	Audience string `json:"audience"`
 
 	// AudienceFile reads the expected audience from a file. Used
-	// together with /shared/client-id.txt (mounted by the operator
-	// from a Keycloak-credentials Secret). The file may not exist at
-	// Configure time; a background poll started by Init waits for it
-	// and updates the plugin when it appears.
+	// together with client-registration's /shared/client-id.txt. The
+	// file may not exist at Configure time; a background poll started
+	// by Init waits for it and updates the plugin when it appears.
 	//
 	// Note: an empty-string value is treated as "unset" — applyDefaults
 	// will fill in /shared/client-id.txt. To opt out of any file poll,
@@ -76,6 +75,21 @@ type jwtValidationConfig struct {
 	// "static" (default) uses Audience/AudienceFile; "per-host" derives
 	// it from pctx.Host via routing.ServiceNameFromHost (waypoint mode).
 	AudienceMode string `json:"audience_mode"`
+
+	// AllowedAudiences lists extra audience strings the sidecar accepts
+	// for inbound JWT validation (OR semantics: the token's aud claim
+	// must contain at least one of the configured values).
+	//
+	// Union order (first occurrence wins when deduplicating): each
+	// `allowed_audiences` entry in config order, then literal `audience`,
+	// then the value read from `audience_file` when used. Callers should
+	// not rely on order for security decisions — only membership matters.
+	//
+	// Transitional bridge for deployments where tokens legitimately carry
+	// multiple audiences (RFC 7519 string or array) and the agent must
+	// accept more than the workload client ID alone — prefer aligning
+	// IdP audience policy long-term. See plugin-reference.md.
+	AllowedAudiences []string `json:"allowed_audiences"`
 
 	// BypassPaths are URL path globs (see authlib/bypass) that skip
 	// validation entirely.
@@ -101,12 +115,12 @@ func (c *jwtValidationConfig) applyDefaults() {
 		c.AudienceMode = "static"
 	}
 	// When neither Audience nor AudienceFile is set, fall back to the
-	// Kagenti convention: the operator's webhook mounts a Secret
-	// containing the agent's client ID (which doubles as the inbound
-	// audience) at this path. Deployments outside Kagenti should set
+	// Kagenti convention: client-registration writes the agent's client
+	// ID (which doubles as the inbound audience) to this path.
+	// Deployments that don't run client-registration should set
 	// Audience explicitly — the Configure-time read is best-effort and
 	// Init's poll will give up silently if ctx is cancelled.
-	if c.AudienceMode == "static" && c.Audience == "" && c.AudienceFile == "" {
+	if c.AudienceMode == "static" && c.Audience == "" && c.AudienceFile == "" && len(c.AllowedAudiences) == 0 {
 		c.AudienceFile = "/shared/client-id.txt"
 	}
 	if len(c.BypassPaths) == 0 {
@@ -123,16 +137,42 @@ func (c *jwtValidationConfig) validate() error {
 	}
 	switch c.AudienceMode {
 	case "static":
-		// applyDefaults guarantees AudienceFile is set whenever both
-		// Audience and AudienceFile arrived empty, so no check here —
-		// the plugin will always have either a literal audience or a
-		// file path to poll.
+		// applyDefaults sets audience_file when audience, audience_file,
+		// and allowed_audiences are all empty. Otherwise at least one
+		// source supplies expected audiences (literal, file path, or
+		// allowed_audiences list).
 	case "per-host":
 		// Audience derived at request time from pctx.Host — nothing to check.
 	default:
 		return fmt.Errorf("audience_mode must be static or per-host, got %q", c.AudienceMode)
 	}
 	return nil
+}
+
+// expectedAudiences merges allowed_audiences, literal audience, and an
+// optional value read from audience_file (caller passes trimmed file
+// contents, or "" when unreadable / unused). See AllowedAudiences field
+// for union / dedup order.
+func expectedAudiences(c jwtValidationConfig, audienceFromFile string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	for _, a := range c.AllowedAudiences {
+		add(a)
+	}
+	add(c.Audience)
+	add(audienceFromFile)
+	return out
 }
 
 // JWTValidation validates inbound JWTs. Internal state is built during
@@ -147,8 +187,8 @@ type JWTValidation struct {
 	// bgCancel stops the background audience-file poller started by
 	// Init. It's created with context.Background() (not Init's ctx) so
 	// the poller's lifetime is the plugin's lifetime, not Start's
-	// 60-second budget — otherwise a slow Secret-mount propagation
-	// during pod boot would orphan the plugin after the initCtx deadline.
+	// 60-second budget — otherwise a slow client-registration during
+	// pod boot would orphan the plugin after the initCtx deadline.
 	//
 	// Held in an atomic.Pointer so a future caller can invoke Shutdown
 	// from a goroutine other than the one that ran Init without racing
@@ -174,8 +214,8 @@ func (p *JWTValidation) Capabilities() pipeline.PluginCapabilities {
 
 // Configure decodes the plugin's config subtree, applies defaults,
 // validates, and constructs the internal auth handler. If AudienceFile
-// is set but the file isn't yet readable (Secret mount still
-// propagating during pod boot), the handler is created with an empty
+// is set but the file isn't yet readable (client-registration still
+// provisioning during pod boot), the handler is created with an empty
 // audience and Init's goroutine fills it in when the file appears.
 func (p *JWTValidation) Configure(raw json.RawMessage) error {
 	var c jwtValidationConfig
@@ -202,10 +242,10 @@ func (p *JWTValidation) Configure(raw json.RawMessage) error {
 		p.audienceDeriver = routing.ServiceNameFromHost
 	}
 
-	audience := c.Audience
-	if audience == "" && c.AudienceFile != "" {
+	var audienceFromFile string
+	if c.Audience == "" && c.AudienceFile != "" {
 		if v, err := config.ReadCredentialFile(c.AudienceFile); err == nil {
-			audience = v
+			audienceFromFile = v
 		} else {
 			// Boot-time visibility: operators see this in `kubectl logs`
 			// of the initial pod instead of chasing 503s from traffic
@@ -225,6 +265,8 @@ func (p *JWTValidation) Configure(raw json.RawMessage) error {
 		}
 	}
 
+	audiences := expectedAudiences(c, audienceFromFile)
+
 	matcher, err := bypass.NewMatcher(c.BypassPaths)
 	if err != nil {
 		return fmt.Errorf("jwt-validation bypass patterns: %w", err)
@@ -233,7 +275,7 @@ func (p *JWTValidation) Configure(raw json.RawMessage) error {
 	p.inner = auth.New(auth.Config{
 		Verifier: verifier,
 		Bypass:   matcher,
-		Identity: auth.IdentityConfig{Audience: audience},
+		Identity: auth.IdentityConfig{Audiences: audiences, Issuer: c.Issuer},
 	})
 	return nil
 }
@@ -247,6 +289,9 @@ func (p *JWTValidation) Configure(raw json.RawMessage) error {
 // so Pipeline.Start's 60s init budget doesn't kill it. Shutdown
 // cancels the watcher when the process is shutting down.
 func (p *JWTValidation) Init(_ context.Context) error {
+	// Skip background poll when not using audience_file, when a literal
+	// audience was set in config, or when Configure already populated
+	// identity (synchronous read from file or allowed_audiences-only).
 	if p.cfg.AudienceFile == "" || p.cfg.Audience != "" || p.inner.Ready() {
 		return nil
 	}
@@ -269,9 +314,10 @@ func (p *JWTValidation) Init(_ context.Context) error {
 				"path", p.cfg.AudienceFile, "error", err)
 			return
 		}
-		p.inner.UpdateIdentity(auth.IdentityConfig{Audience: v}, nil)
+		audiences := expectedAudiences(p.cfg, v)
+		p.inner.UpdateIdentity(auth.IdentityConfig{Audiences: audiences, Issuer: p.cfg.Issuer}, nil)
 		slog.Info("jwt-validation: audience loaded from file",
-			"path", p.cfg.AudienceFile, "audience", v)
+			"path", p.cfg.AudienceFile, "audiences", audiences)
 	}()
 	return nil
 }
@@ -311,8 +357,9 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			Action: pipeline.ActionDeny,
 			Reason: result.DenyReasonCode.String(),
 			Details: map[string]string{
-				"expected_issuer":   p.cfg.Issuer,
-				"expected_audience": audience,
+				"expected_issuer":        p.cfg.Issuer,
+				"expected_audiences":     strings.Join(p.inner.InboundAudiences(), ","),
+				"expected_audience_host": audience,
 			},
 		})
 		// result.DenyReason carries the specific failure (missing header,
@@ -358,7 +405,7 @@ func (p *JWTValidation) OnResponse(_ context.Context, _ *pipeline.Context) pipel
 }
 
 // Ready reports whether the plugin can validate traffic. auth.Auth's
-// Ready() returns true once Identity.Audience is non-empty, which the
+// Ready() returns true once Identity.Audiences is non-empty, which the
 // plugin's synchronous-load path in Configure or the async poll in
 // Init (via auth.UpdateIdentity) arranges. Per-host mode skips the
 // audience check because the audience is derived from pctx.Host per
