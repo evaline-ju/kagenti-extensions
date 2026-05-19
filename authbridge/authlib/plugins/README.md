@@ -16,6 +16,7 @@ Built-in plugins and the open plugin registry. Plugin authoring docs live under
 | `a2a-parser` | Parse Agent-to-Agent JSON-RPC traffic into `Extensions.A2A` |
 | `mcp-parser` | Parse Model Context Protocol traffic into `Extensions.MCP` |
 | `inference-parser` | Parse OpenAI-style / Ollama inference traffic into `Extensions.Inference` |
+| `ibac` | Outbound Intent-Based Access Control: LLM judge denies outbound HTTP that doesn't align with the user's most recent intent. Catches prompt-injection / data-exfiltration attempts |
 
 ## Registry
 
