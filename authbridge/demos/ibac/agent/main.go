@@ -24,6 +24,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -556,13 +558,44 @@ type a2aPart struct {
 type jsonRPCResponse struct {
 	JSONRPC string        `json:"jsonrpc"`
 	ID      any           `json:"id"`
-	Result  *a2aResult    `json:"result,omitempty"`
+	Result  *a2aTask      `json:"result,omitempty"`
 	Error   *jsonRPCError `json:"error,omitempty"`
 }
 
-type a2aResult struct {
+// a2aTask is the A2A v0.3.0 Task response shape. We use this rather
+// than the simpler Message shape (role+parts directly under result)
+// because the authbridge a2a-parser's response-side artifact
+// extraction (extractSendResponse in plugin.go) keys off
+// `result.status.state` and `result.artifacts[].parts[].text`. Without
+// the Task shape, abctl and the session-event JSON show only the
+// REQUEST text on response events, which makes the agent's reply
+// invisible in the platform observability layer.
+//
+// kagenti's backend chat handler accepts both shapes (chat.py:211
+// handles Task, chat.py:219 handles Message), so emitting a Task
+// here doesn't break the UI.
+type a2aTask struct {
+	ID        string        `json:"id"`
+	ContextID string        `json:"contextId,omitempty"`
+	Kind      string        `json:"kind"`
+	Status    a2aStatus     `json:"status"`
+	Artifacts []a2aArtifact `json:"artifacts,omitempty"`
+}
+
+type a2aStatus struct {
+	State   string      `json:"state"`
+	Message *a2aMessage `json:"message,omitempty"`
+}
+
+type a2aMessage struct {
 	Role  string    `json:"role"`
 	Parts []a2aPart `json:"parts"`
+}
+
+type a2aArtifact struct {
+	ArtifactID string    `json:"artifactId"`
+	Name       string    `json:"name,omitempty"`
+	Parts      []a2aPart `json:"parts"`
 }
 
 type jsonRPCError struct {
@@ -667,21 +700,53 @@ func handleA2A(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeRPCSuccess(w, req.ID, result)
+	writeRPCSuccess(w, req.ID, sessionID, result)
 }
 
-func writeRPCSuccess(w http.ResponseWriter, id any, text string) {
+// writeRPCSuccess emits an A2A v0.3.0 Task response. Both
+// status.message AND artifacts carry the agent's reply: the kagenti
+// backend's chat handler reads from status.message (chat.py:211),
+// while the authbridge a2a-parser's response-side artifact extractor
+// reads from artifacts[].parts[].text (plugin.go:188-195). Carrying
+// the text in both keeps the kagenti UI working AND gets the reply
+// into the session-event JSON for abctl / show-result.
+func writeRPCSuccess(w http.ResponseWriter, id any, sessionID, text string) {
+	taskID := newUUID()
+	parts := []a2aPart{{Kind: "text", Text: text}}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
-		Result: &a2aResult{
-			Role: "assistant",
-			Parts: []a2aPart{
-				{Kind: "text", Text: text},
+		Result: &a2aTask{
+			ID:        taskID,
+			ContextID: sessionID,
+			Kind:      "task",
+			Status: a2aStatus{
+				State: "completed",
+				Message: &a2aMessage{
+					Role:  "agent",
+					Parts: parts,
+				},
+			},
+			Artifacts: []a2aArtifact{
+				{
+					ArtifactID: newUUID(),
+					Name:       "reply",
+					Parts:      parts,
+				},
 			},
 		},
 	})
+}
+
+// newUUID returns a hex-encoded random ID. Good enough for A2A
+// task / artifact IDs in this demo — we don't need RFC 4122 UUIDs.
+func newUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func writeRPCError(w http.ResponseWriter, id any, code int, message string) {
