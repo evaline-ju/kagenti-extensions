@@ -13,7 +13,6 @@ import (
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/contracts"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
@@ -212,13 +211,7 @@ func init() {
 func (p *TokenExchange) Name() string { return "token-exchange" }
 
 func (p *TokenExchange) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{
-		// token-exchange takes exclusive ownership of the outbound
-		// Authorization header. Any other plugin that also claims this
-		// resource (e.g., token-broker) will fail at plugins.Build
-		// time rather than silently clobbering our replaced token.
-		Claims: []string{contracts.ClaimAuthorizationHeader},
-	}
+	return pipeline.PluginCapabilities{}
 }
 
 func (p *TokenExchange) Configure(raw json.RawMessage) error {

@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/gobwas/glob"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/contracts"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenbroker/client"
@@ -155,14 +154,7 @@ func NewTokenBroker() *TokenBroker { return &TokenBroker{} }
 func (p *TokenBroker) Name() string { return "token-broker" }
 
 func (p *TokenBroker) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{
-		// token-broker takes exclusive ownership of the outbound
-		// Authorization header — same claim as token-exchange, so
-		// configuring both in the same outbound chain fails at
-		// plugins.Build rather than letting one silently clobber
-		// the other.
-		Claims: []string{contracts.ClaimAuthorizationHeader},
-	}
+	return pipeline.PluginCapabilities{}
 }
 
 func (p *TokenBroker) Configure(raw json.RawMessage) error {
