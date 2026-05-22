@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,31 @@ func TestProvider_MirrorJWT_ReentrantSameAudience(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "jwt_svid.token")); !os.IsNotExist(err) {
 		t.Errorf("expected no jwt_svid.token write on reentrant call, err=%v", err)
+	}
+}
+
+// TestProvider_MirrorJWT_RejectsDifferentAudience verifies that asking
+// MirrorJWT to mirror a SECOND, DIFFERENT audience after one is already
+// active returns an error rather than silently corrupting jwt_svid.token
+// (every audience writes to the same path; concurrent writers would
+// race). Uses the mirrorAudiences pre-population trick to short-circuit
+// before any SDK call.
+func TestProvider_MirrorJWT_RejectsDifferentAudience(t *testing.T) {
+	dir := t.TempDir()
+	mctx, mcancel := context.WithCancel(context.Background())
+	defer mcancel()
+	p := &Provider{
+		cfg:             ProviderConfig{MirrorFiles: true, MirrorDir: dir},
+		mirrorAudiences: map[string]struct{}{"already-running": {}},
+		mctx:            mctx,
+		mcancel:         mcancel,
+	}
+	err := p.MirrorJWT(context.Background(), "different-audience")
+	if err == nil {
+		t.Fatal("MirrorJWT with conflicting audience = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "already-running") {
+		t.Errorf("error should name the existing audience; got: %v", err)
 	}
 }
 

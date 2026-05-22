@@ -214,10 +214,10 @@ func (p *Provider) ensureJWTSDK() (*workloadapi.JWTSource, error) {
 // lifetime (or every 30s on error). The goroutine respects the
 // Provider's mirror context and exits on Close().
 //
-// Reentrant: a second call with the same audience does NOT spawn a
-// duplicate goroutine. Different audiences each get their own goroutine
-// (and their own jwt_svid.token... but they all write to the same path,
-// so callers should treat MirrorJWT as a single-audience contract).
+// Single-audience contract: all audiences write to the SAME file path
+// (<MirrorDir>/jwt_svid.token). A second call with a DIFFERENT audience
+// returns an error rather than silently corrupting the first caller's
+// file. A second call with the same audience is a no-op (idempotent).
 func (p *Provider) MirrorJWT(ctx context.Context, audience string) error {
 	if !p.cfg.MirrorFiles {
 		return nil
@@ -226,20 +226,37 @@ func (p *Provider) MirrorJWT(ctx context.Context, audience string) error {
 		return errors.New("spiffe.Provider.MirrorJWT: audience is required")
 	}
 
-	sdk, err := p.ensureJWTSDK()
-	if err != nil {
-		return err
-	}
-
-	// Reentrancy guard. Hold the lock long enough to atomically
-	// check-and-mark the audience as started.
+	// Audience-conflict check FIRST, before allocating an SDK client.
+	// All audiences write to the same jwt_svid.token path; a second
+	// caller with a different audience would race the existing
+	// goroutine and silently corrupt the file.
 	p.jwtMu.Lock()
 	if _, already := p.mirrorAudiences[audience]; already {
 		p.jwtMu.Unlock()
 		return nil
 	}
+	if len(p.mirrorAudiences) > 0 {
+		var existing string
+		for a := range p.mirrorAudiences {
+			existing = a
+			break
+		}
+		p.jwtMu.Unlock()
+		return fmt.Errorf("spiffe.Provider.MirrorJWT: already mirroring audience %q to %s/jwt_svid.token; cannot also mirror %q to the same path",
+			existing, p.cfg.MirrorDir, audience)
+	}
 	p.mirrorAudiences[audience] = struct{}{}
 	p.jwtMu.Unlock()
+
+	sdk, err := p.ensureJWTSDK()
+	if err != nil {
+		// Roll back the audience claim so a future call (after the
+		// caller fixes their socket / network) can retry.
+		p.jwtMu.Lock()
+		delete(p.mirrorAudiences, audience)
+		p.jwtMu.Unlock()
+		return err
+	}
 
 	// Synchronous initial write so the cold-start guarantee is
 	// observable to anything that races with our return. Use the

@@ -26,7 +26,6 @@ func TestProvider_BasicLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	p, err := NewProvider(ctx, ProviderConfig{
 		SocketPath:  socket,
-		JWTAudience: "test-audience",
 		MirrorFiles: true,
 		MirrorDir:   dir,
 	})
@@ -38,8 +37,12 @@ func TestProvider_BasicLifecycle(t *testing.T) {
 	if p.X509Source() == nil {
 		t.Error("X509Source() = nil, want non-nil")
 	}
-	if p.JWTSource() == nil {
-		t.Error("JWTSource() = nil, want non-nil when JWTAudience is set")
+	jwtSrc, err := p.JWTSource("test-audience")
+	if err != nil {
+		t.Fatalf("JWTSource(\"test-audience\"): %v", err)
+	}
+	if jwtSrc == nil {
+		t.Error("JWTSource(audience) = nil, want non-nil")
 	}
 
 	// Sanity-check the X509 source can fetch a cert (the cold-start
