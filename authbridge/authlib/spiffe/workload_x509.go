@@ -22,20 +22,27 @@ type x509SVIDFetcher interface {
 }
 
 // workloadX509 adapts a *workloadapi.X509Source to the framework
-// X509Source interface. Trust domain captured at construction; TrustBundle
-// returns the bundle for the workload's own domain (federated bundles
-// included automatically when the SPIRE server is configured for them).
+// X509Source interface. Trust domain captured at construction;
+// TrustBundle returns the bundle for the workload's own domain only
+// (see TrustBundle for the federation caveat).
 type workloadX509 struct {
 	sdk x509SVIDFetcher
 	td  spiffeid.TrustDomain
 }
 
+// Compile-time assertion that workloadX509 satisfies X509Source. Also
+// keeps the type "used" from the linter's point of view while the
+// constructor is still waiting for its Provider caller (plan task T5).
+var _ X509Source = (*workloadX509)(nil)
+
 // newWorkloadX509 wraps a go-spiffe X509Source so it satisfies the local
 // X509Source interface. The td argument fixes which trust domain bundle
 // is returned by TrustBundle — typically the workload's own domain.
 //
-// Wired in by the upcoming Provider type (see plan task T5); not used by
-// any caller yet, hence the nolint:unused.
+// Wired in by the upcoming Provider type (see plan task T5); not called
+// by any caller yet, hence the nolint:unused on the constructor (the
+// var _ X509Source assertion above already verifies the interface
+// contract at build time).
 //
 //nolint:unused // wired in by Provider in plan task T5
 func newWorkloadX509(sdk *workloadapi.X509Source, td spiffeid.TrustDomain) *workloadX509 {
@@ -64,10 +71,15 @@ func (w *workloadX509) Certificate() (*tls.Certificate, error) {
 	}, nil
 }
 
-// TrustBundle returns the trust bundle for the workload's own trust
-// domain as an *x509.CertPool. Empty pool is treated as an error: a TLS
-// handshake with no roots would silently accept any cert, defeating the
-// point of mTLS.
+// TrustBundle returns the X.509 bundle for the workload's own trust
+// domain only, as an *x509.CertPool. Federated peers (SVIDs from other
+// trust domains) are NOT validated by this source: GetX509BundleForTrustDomain
+// returns just the requested domain's authorities, not federated peers'.
+// Accepting federated SVIDs would require a bundle source that spans
+// every federated domain (e.g. a *x509bundle.Set). Future work in this
+// package may add that variant; for now the proxy-sidecar mTLS path is
+// single-domain. Empty pool is treated as an error: a TLS handshake with
+// no roots would silently accept any cert, defeating the point of mTLS.
 func (w *workloadX509) TrustBundle() (*x509.CertPool, error) {
 	bundle, err := w.sdk.GetX509BundleForTrustDomain(w.td)
 	if err != nil {
