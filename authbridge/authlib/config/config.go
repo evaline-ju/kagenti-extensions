@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"gopkg.in/yaml.v3"
@@ -30,6 +31,12 @@ type Config struct {
 	// envoy-sidecar mode is unaffected (Envoy handles its own TLS via
 	// SDS). Pointer so absent block = today's plaintext behavior.
 	MTLS *MTLSConfig `yaml:"mtls,omitempty" json:"mtls,omitempty"`
+	// SPIFFE, when non-nil, configures the in-process Provider that
+	// supplies X.509-SVIDs to the mTLS listeners and a JWT-SVID to the
+	// token-exchange plugin (when configured). Pointer so absent block
+	// = today's spiffe-helper-driven behavior (until the chart/operator
+	// follow-ups land and start populating the block).
+	SPIFFE *SPIFFEConfig `yaml:"spiffe,omitempty" json:"spiffe,omitempty"`
 }
 
 // MTLSMode names the inbound + outbound TLS posture. Vocabulary
@@ -54,17 +61,15 @@ const (
 // directions; if asymmetric needs surface later, this can split into
 // separate Inbound / Outbound sub-blocks without breaking the
 // existing flat shape.
+//
+// X.509-SVID material is supplied by the in-process Provider (see
+// SPIFFEConfig) and no longer configured here. Legacy chart configs may
+// still ship cert_file / key_file / bundle_file keys; the YAML loader
+// silently drops them (pinned by TestLoad_UnknownMTLSFields_Ignored).
 type MTLSConfig struct {
 	// Mode controls the inbound + outbound TLS posture. Defaults to
 	// permissive when empty.
 	Mode MTLSMode `yaml:"mode" json:"mode"`
-
-	// CertFile / KeyFile / BundleFile point at spiffe-helper output.
-	// Defaults to /opt/svid.pem, /opt/svid_key.pem, /opt/svid_bundle.pem
-	// (matching the kagenti chart's helper.conf template).
-	CertFile   string `yaml:"cert_file" json:"cert_file"`
-	KeyFile    string `yaml:"key_file" json:"key_file"`
-	BundleFile string `yaml:"bundle_file" json:"bundle_file"`
 }
 
 // ResolvedMode returns Mode with the empty-string default applied.
@@ -75,10 +80,9 @@ func (m *MTLSConfig) ResolvedMode() MTLSMode {
 	return m.Mode
 }
 
-// Validate rejects unknown mode values at startup. Cert / key /
-// bundle paths are validated lazily by the X509Source — operators
-// can ship a config that points at not-yet-written files (cold
-// start), and the source's wait-for-credential pattern handles it.
+// Validate rejects unknown mode values at startup. SVID material is
+// supplied by the SPIFFE Provider (see SPIFFEConfig); validation of
+// that material is the Provider's responsibility, not this struct's.
 func (m *MTLSConfig) Validate() error {
 	if m == nil {
 		return nil
@@ -92,32 +96,48 @@ func (m *MTLSConfig) Validate() error {
 	}
 }
 
-// CheckPathsReadable stats the cert / key / bundle paths and returns
-// the list of paths that are NOT yet readable. Empty list means
-// everything is in place. Used by the cmd binaries at startup to
-// emit an early WARN when a path is misconfigured (typo, wrong
-// volume mount) — separates that case from the legitimate cold-start
-// "spiffe-helper hasn't written yet" pattern, which the X509Source's
-// per-handshake re-read already handles.
+// SPIFFEConfig is the top-level SPIFFE provider configuration. One block
+// drives the in-process Provider that supplies X.509-SVIDs to the mTLS
+// listeners and a JWT-SVID to the token-exchange plugin (when configured).
 //
-// The presence of unreadable paths is not a fatal error: returning
-// them as a list lets the caller decide. cmd binaries log a WARN and
-// continue; tests / verifiers can fail-fast if they want stricter
-// semantics.
-func (m *MTLSConfig) CheckPathsReadable() []string {
-	if m == nil {
+// Defaults match today's spiffe-helper-driven setup so existing
+// deployments boot without changes once chart/operator follow-ups land.
+//
+// The audience for the JWT-SVID used by token-exchange as a client
+// assertion is per-plugin (tokenexchange.identity.jwt_audience) and is
+// no longer carried here — only the tokenexchange plugin's spiffe
+// identity path consumes it, so it lives in that plugin's config.
+type SPIFFEConfig struct {
+	// Socket is the SPIRE agent socket URL. Defaults to
+	// "unix:///spiffe-workload-api/spire-agent.sock" — the same path
+	// spiffe-helper used to talk to.
+	Socket string `yaml:"socket" json:"socket"`
+
+	// MirrorFiles, when true, runs an in-process goroutine that writes
+	// /opt/svid.pem, /opt/svid_key.pem, /opt/svid_bundle.pem, and
+	// /opt/jwt_svid.token on every rotation — preserving today's
+	// external-reader contract (Envoy filesystem SDS, e2e probes,
+	// debugging shells). Pointer so we can distinguish unset
+	// ("apply default true") from explicit false ("operator opted out").
+	MirrorFiles *bool `yaml:"mirror_files" json:"mirror_files"`
+
+	// MirrorDir is the directory where mirror files are written.
+	// Defaults to "/opt". Only used when MirrorFiles is true.
+	MirrorDir string `yaml:"mirror_dir" json:"mirror_dir"`
+}
+
+// Validate rejects sockets that aren't unix:// URLs. The Workload API
+// only speaks over a unix domain socket in our deployment model; a
+// tcp:// or http:// scheme is almost certainly an operator typo and
+// should fail at startup rather than at first dial.
+func (s *SPIFFEConfig) Validate() error {
+	if s == nil {
 		return nil
 	}
-	var missing []string
-	for _, p := range []string{m.CertFile, m.KeyFile, m.BundleFile} {
-		if p == "" {
-			continue // shouldn't happen post-Load (defaults applied)
-		}
-		if _, err := os.Stat(p); err != nil {
-			missing = append(missing, p)
-		}
+	if !strings.HasPrefix(s.Socket, "unix://") {
+		return fmt.Errorf("spiffe.socket must be a unix:// URL, got %q", s.Socket)
 	}
-	return missing
+	return nil
 }
 
 // SessionConfig controls in-memory session tracking for cross-request correlation.
@@ -342,22 +362,29 @@ func Load(path string) (*Config, error) {
 		cfg.Stats.StatsAddress = ":9093"
 	}
 
-	// mTLS validation + path defaults. The cert paths default to
-	// spiffe-helper's known output locations so operators can flip
-	// `mtls: { mode: permissive }` without spelling them out.
+	// mTLS validation. SVID material now comes from the SPIFFE Provider
+	// (see SPIFFEConfig) — there are no per-mtls path fields to default.
 	if err := cfg.MTLS.Validate(); err != nil {
 		return nil, err
 	}
-	if cfg.MTLS != nil {
-		if cfg.MTLS.CertFile == "" {
-			cfg.MTLS.CertFile = "/opt/svid.pem"
+
+	// SPIFFE defaults match the helper.conf-driven setup: SPIRE agent
+	// socket path, mirror-files-on, /opt mirror directory. Validation
+	// runs after defaults so an unset socket isn't reported as invalid.
+	if cfg.SPIFFE != nil {
+		if cfg.SPIFFE.Socket == "" {
+			cfg.SPIFFE.Socket = "unix:///spiffe-workload-api/spire-agent.sock"
 		}
-		if cfg.MTLS.KeyFile == "" {
-			cfg.MTLS.KeyFile = "/opt/svid_key.pem"
+		if cfg.SPIFFE.MirrorFiles == nil {
+			t := true
+			cfg.SPIFFE.MirrorFiles = &t
 		}
-		if cfg.MTLS.BundleFile == "" {
-			cfg.MTLS.BundleFile = "/opt/svid_bundle.pem"
+		if cfg.SPIFFE.MirrorDir == "" {
+			cfg.SPIFFE.MirrorDir = "/opt"
 		}
+	}
+	if err := cfg.SPIFFE.Validate(); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil

@@ -39,6 +39,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 
 	// Only the ext_proc listener is compiled in (no ext_authz, no
 	// HTTP proxies).
@@ -97,6 +98,41 @@ func main() {
 		log.Fatal("--config is required")
 	}
 
+	// Build the SPIFFE Provider when the spiffe block is configured.
+	// envoy-sidecar mode currently doesn't terminate mTLS at this
+	// process — Envoy does TCP passthrough — so X509Source() is unused
+	// here. The Provider is still needed because token-exchange's
+	// spiffe identity path consumes a JWTSource via DI, and the file
+	// mirror keeps /opt/jwt_svid.token (and the X.509 SVID files)
+	// fresh on disk for Envoy and downstream consumers.
+	//
+	// We need cfg first to read the spiffe block, so do a one-shot
+	// Load before buildPipelines runs (buildPipelines re-Loads
+	// internally for hot-reload). The Provider is captured by
+	// buildPipelines via closure so reload-time pipeline rebuilds
+	// inject the same Provider into freshly constructed plugin
+	// instances.
+	bootCfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("initial config load: %v", err)
+	}
+	var provider *spiffe.Provider
+	if bootCfg.SPIFFE != nil {
+		mirrorFiles := true
+		if bootCfg.SPIFFE.MirrorFiles != nil {
+			mirrorFiles = *bootCfg.SPIFFE.MirrorFiles
+		}
+		provider, err = spiffe.NewProvider(context.Background(), spiffe.ProviderConfig{
+			SocketPath:  bootCfg.SPIFFE.Socket,
+			MirrorFiles: mirrorFiles,
+			MirrorDir:   bootCfg.SPIFFE.MirrorDir,
+		})
+		if err != nil {
+			log.Fatalf("spiffe provider: %v", err)
+		}
+		defer provider.Close()
+	}
+
 	buildPipelines := func() (*pipeline.Pipeline, *pipeline.Pipeline, *config.Config, error) {
 		c, err := config.Load(*configPath)
 		if err != nil {
@@ -112,11 +148,11 @@ func main() {
 		if err := config.Validate(c); err != nil {
 			return nil, nil, nil, err
 		}
-		in, err := plugins.Build(c.Pipeline.Inbound.Plugins)
+		in, err := plugins.BuildWithSPIFFE(c.Pipeline.Inbound.Plugins, provider)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("inbound: %w", err)
 		}
-		out, err := plugins.Build(c.Pipeline.Outbound.Plugins)
+		out, err := plugins.BuildWithSPIFFE(c.Pipeline.Outbound.Plugins, provider)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("outbound: %w", err)
 		}

@@ -1,11 +1,13 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Validate checks the top-level runtime config: mode, listener combo,
 // and that the pipeline composition is populated. Plugin-specific
-// validation (issuer, token URL, identity type) lives inside each
-// plugin's Configure and runs at pipeline build time.
+// validation (issuer, token URL, identity type, jwt_audience) lives
+// inside each plugin's Configure and runs at pipeline build time.
 //
 // Empty pipelines are rejected. Under the per-plugin config shape,
 // a valid runtime config always names at least one inbound plugin

@@ -49,12 +49,12 @@ authbridge/
 │
 ├── cmd/authbridge-proxy/             # proxy-sidecar mode (default). Full plugin set.
 │   ├── main.go
-│   ├── Dockerfile                    #   proxy-sidecar combined image (authbridge-proxy + spiffe-helper)
+│   ├── Dockerfile                    #   proxy-sidecar combined image (authbridge-proxy)
 │   └── entrypoint.sh
 │
 ├── cmd/authbridge-envoy/             # envoy-sidecar mode. Full plugin set.
 │   ├── main.go
-│   ├── Dockerfile                    #   envoy-sidecar combined image (Envoy + authbridge-envoy + spiffe-helper)
+│   ├── Dockerfile                    #   envoy-sidecar combined image (Envoy + authbridge-envoy)
 │   └── entrypoint.sh
 │
 ├── cmd/authbridge-lite/              # proxy-sidecar mode. Lite plugin set (no parsers).
@@ -126,7 +126,7 @@ wants to register.
 - The operator-supplied env vars (`KEYCLOAK_URL`, `KEYCLOAK_REALM`, `TOKEN_URL`, `ISSUER`, `DEFAULT_OUTBOUND_POLICY`, `CLIENT_ID`) are consumed by the default `authbridge-combined.yaml` via `${VAR}` expansion — they land inside the appropriate plugin's `config:` block rather than a top-level section.
 - `jwt-validation` derives `jwks_url` from `issuer` when omitted (appends `/protocol/openid-connect/certs`).
 - `token-exchange` derives `token_url` from `keycloak_url + keycloak_realm` when omitted (Keycloak convention).
-- Credential files: the **kagenti-operator** registers each workload with Keycloak and creates a Secret containing `client-id.txt` + `client-secret.txt`; the operator's webhook mounts that Secret at `/shared/client-id.txt` and `/shared/client-secret.txt` in containers that share the `shared-data` volume. `spiffe-helper` (bundled in both combined images, started conditionally on `SPIRE_ENABLED=true`) writes `/opt/jwt_svid.token`. `jwt-validation` reads the audience from `/shared/client-id.txt` via `audience_file`; `token-exchange` reads client credentials via `client_id_file` / `client_secret_file` / `jwt_svid_path`. Each plugin attempts a synchronous read at Configure time and falls back to a background poll from its `Init` goroutine if the file isn't yet readable. The legacy in-pod `client-registration` sidecar has been removed entirely; the `kagenti.io/client-registration-inject: "true"` label is **no longer functional** — the operator's `ClientRegistrationReconciler` still treats it as a "skip operator-managed registration" signal (`SkipReason` in `kagenti-operator/internal/clientreg/names.go:58`), but the legacy sidecar that the label deferred to is gone. Setting it today silently breaks registration; do not add it to new manifests.
+- Credential files: the **kagenti-operator** registers each workload with Keycloak and creates a Secret containing `client-id.txt` + `client-secret.txt`; the operator's webhook mounts that Secret at `/shared/client-id.txt` and `/shared/client-secret.txt` in containers that share the `shared-data` volume. SPIRE-issued credentials are sourced in-process via the `spiffe.Provider` (built from the top-level `spiffe:` block in `authbridge-runtime`) — authbridge's hot path reads X.509 SVIDs from an in-memory `spiffe.X509Source` (no per-handshake file I/O), and `token-exchange` consumes a JWT-SVID from the injected Provider via `plugins.BuildWithSPIFFE`. The Provider also mirrors `/opt/jwt_svid.token`, `/opt/svid.pem`, `/opt/svid_key.pem`, and `/opt/svid_bundle.pem` for external readers (e2e probes, debugging, future Envoy filesystem SDS). The `spiffe-helper` binary is no longer bundled in any combined image, and the `SPIRE_ENABLED` env var no longer gates anything — presence/absence of the `spiffe:` block in YAML drives behavior. `jwt-validation` reads the audience from `/shared/client-id.txt` via `audience_file`; `token-exchange` reads client credentials via `client_id_file` / `client_secret_file`. Each plugin attempts a synchronous read at Configure time and falls back to a background poll from its `Init` goroutine if the file isn't yet readable. The legacy in-pod `client-registration` sidecar has been removed entirely; the `kagenti.io/client-registration-inject: "true"` label is **no longer functional** — the operator's `ClientRegistrationReconciler` still treats it as a "skip operator-managed registration" signal (`SkipReason` in `kagenti-operator/internal/clientreg/names.go:58`), but the legacy sidecar that the label deferred to is gone. Setting it today silently breaks registration; do not add it to new manifests.
 - Outbound route config: `token-exchange` reads `/etc/authproxy/routes.yaml` by default (path is per-plugin, configured via `routes.file` in its config block); inline rules can be declared under `routes.rules`.
 - Outbound `default_policy`: `passthrough` (default) or `exchange`, configured per-plugin (no top-level `DEFAULT_OUTBOUND_POLICY` field anymore; the env var is still expanded into the plugin config by `authbridge-combined.yaml`).
 
@@ -165,8 +165,8 @@ Extensively documented shell script that sets up iptables for transparent traffi
 ### client_registration.py
 
 Idempotent Python script that:
-1. Reads SPIFFE ID from `/opt/jwt_svid.token` JWT `sub` claim (if `SPIRE_ENABLED=true`)
-2. Falls back to `CLIENT_NAME` env var as client ID (if SPIRE disabled)
+1. Reads SPIFFE ID from `/opt/jwt_svid.token` JWT `sub` claim (when authbridge's `spiffe.Provider` mirror is writing the file — i.e., `spiffe:` is configured in `authbridge-runtime`)
+2. Falls back to `CLIENT_NAME` env var as client ID (if no SPIRE-issued JWT-SVID is mirrored)
 3. Creates or reuses a Keycloak client with token exchange enabled
 4. Retrieves the client secret and writes to `SECRET_FILE_PATH` (in cluster deployments, the webhook sets `SECRET_FILE_PATH=/shared/client-secret.txt` to match the shared-volume contract)
 
@@ -222,7 +222,7 @@ When the webhook injects sidecars (via [kagenti-operator](https://github.com/kag
 | `authbridge-config` | ConfigMap | authbridge | `KEYCLOAK_URL`, `KEYCLOAK_REALM`, `PLATFORM_CLIENT_IDS` (optional), `TOKEN_URL` (optional, derived), `ISSUER` (optional, derived or explicit), `DEFAULT_OUTBOUND_POLICY` (optional). Inbound audience validation uses `CLIENT_ID` from `/shared/client-id.txt`. Target audience and scopes are configured per-route in `authproxy-routes`. |
 | `keycloak-admin-secret` | Secret | kagenti-operator (ClientRegistrationReconciler) | `KEYCLOAK_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD` |
 | `authproxy-routes` | ConfigMap (optional) | authbridge | `routes.yaml` with per-host token exchange rules |
-| `spiffe-helper-config` | ConfigMap | spiffe-helper (bundled inside the combined sidecar images) | `helper.conf` (SPIRE agent address, cert paths, JWT SVID config) |
+| `spiffe-helper-config` | ConfigMap (legacy, unused by authbridge) | (none — retained only for compatibility with older deployments) | Previously held `helper.conf` for the bundled `spiffe-helper` binary. Authbridge now drives SPIRE configuration via the top-level `spiffe:` block in `authbridge-runtime` and no longer reads this ConfigMap. |
 | `envoy-config` | ConfigMap | Envoy (inside the `authbridge-envoy` combined image, envoy-sidecar mode only) | `envoy.yaml` (full Envoy configuration) |
 
 **`authproxy-routes` format** (`routes.yaml`):
@@ -244,18 +244,22 @@ Sidecars communicate through files on shared volumes:
 
 | Path | Writer | Reader | Content |
 |------|--------|--------|---------|
-| `/opt/jwt_svid.token` | spiffe-helper | authbridge (token-exchange) | JWT SVID from SPIRE |
-| `/opt/svid.pem` | spiffe-helper | authbridge (mTLS) | X.509 SVID leaf cert (PEM) |
-| `/opt/svid_key.pem` | spiffe-helper | authbridge (mTLS) | X.509 SVID private key (PEM) |
-| `/opt/svid_bundle.pem` | spiffe-helper | authbridge (mTLS) | SPIRE trust bundle (PEM, may concatenate multiple CAs) |
+| `/opt/jwt_svid.token` | spiffe.Provider mirror | authbridge (token-exchange) + external readers | JWT SVID, audience from `spiffe.jwt_audience` |
+| `/opt/svid.pem` | spiffe.Provider mirror | external readers (debugging, future Envoy SDS) | X.509 SVID leaf cert (PEM) |
+| `/opt/svid_key.pem` | spiffe.Provider mirror | external readers | X.509 SVID private key (PEM) |
+| `/opt/svid_bundle.pem` | spiffe.Provider mirror | external readers | SPIRE trust bundle (PEM, may concatenate multiple CAs) |
 | `/shared/client-id.txt` | operator (Secret mount) | authbridge | SPIFFE ID or workload name |
 | `/shared/client-secret.txt` | operator (Secret mount) | authbridge | Keycloak client secret |
 
-The X.509 SVID files are written by spiffe-helper unconditionally on
-every authbridge pod with `SPIRE_ENABLED=true` (they're already present
-on disk in existing deployments). authbridge consumes them only when
-`mtls:` is configured at the top level of `authbridge-runtime`; absent
-that block, today's plaintext behavior is preserved.
+The X.509 SVID files are mirrored to disk by the in-process
+`spiffe.Provider` whenever the runtime config carries a top-level
+`spiffe:` block; the files exist for external readers (e2e probes,
+debugging, future Envoy filesystem SDS) and are kept fresh on every
+rotation. The listener itself reads SVIDs in-memory via
+`spiffe.X509Source` and never re-reads the files. authbridge enables
+mTLS only when `mtls:` is configured at the top level of
+`authbridge-runtime`; absent that block, today's plaintext behavior is
+preserved.
 
 ## Top-level `mtls:` configuration
 

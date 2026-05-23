@@ -40,7 +40,6 @@ data:
   SPIRE_ENABLED: "true"
   CLIENT_AUTH_TYPE: "client-secret"
   SPIFFE_IDP_ALIAS: "spire-spiffe"
-  JWT_AUDIENCE: "http://keycloak.localtest.me:8080/realms/kagenti"
   EXPECTED_AUDIENCE: "http://keycloak.localtest.me:8080/realms/kagenti"
   # — Weather advanced: explicit token + JWKS (ext_proc) —
   TOKEN_URL: "http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/token"

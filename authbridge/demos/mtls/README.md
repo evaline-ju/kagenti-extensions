@@ -3,10 +3,13 @@
 Two pods that talk to each other through their authbridge sidecars,
 configured with `mtls.mode: strict`. Confirms end-to-end:
 
-- spiffe-helper writes `/opt/svid.pem` / `_key.pem` / `_bundle.pem` on
-  both pods (it always does — that part is unchanged).
-- authbridge consumes those files and uses them for both inbound
-  (reverse proxy) and outbound (forward proxy) mTLS.
+- authbridge's `spiffe.Provider` mirror writes `/opt/svid.pem` /
+  `_key.pem` / `_bundle.pem` on both pods on every rotation; the files
+  exist for external readers (e2e probes, debugging, future Envoy
+  filesystem SDS).
+- For the listener itself, authbridge reads X.509 SVIDs in-memory via
+  `spiffe.X509Source` (no per-handshake file I/O) and uses them for
+  both inbound (reverse proxy) and outbound (forward proxy) mTLS.
 - The wire between the two pods is encrypted: a `tcpdump` on the
   cluster network shows no plaintext HTTP request lines on TCP port
   8080.

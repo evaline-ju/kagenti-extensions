@@ -565,10 +565,10 @@ func TestMTLSConfig_ResolvedMode(t *testing.T) {
 	}
 }
 
-// Load applies the spiffe-helper default cert/key/bundle paths when
-// the operator omits them — the common case is `mtls: { mode:
-// permissive }` and nothing more.
-func TestLoad_MTLS_DefaultPaths(t *testing.T) {
+// Load preserves the mtls.mode value; SVID material is sourced from the
+// SPIFFE Provider (see TestSPIFFEConfig_Defaults) and is no longer part
+// of the mtls block.
+func TestLoad_MTLS_ModeOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := `mode: proxy-sidecar
@@ -591,15 +591,6 @@ mtls:
 	}
 	if cfg.MTLS.Mode != MTLSModeStrict {
 		t.Errorf("Mode = %q, want strict", cfg.MTLS.Mode)
-	}
-	if cfg.MTLS.CertFile != "/opt/svid.pem" {
-		t.Errorf("CertFile = %q, want default", cfg.MTLS.CertFile)
-	}
-	if cfg.MTLS.KeyFile != "/opt/svid_key.pem" {
-		t.Errorf("KeyFile = %q, want default", cfg.MTLS.KeyFile)
-	}
-	if cfg.MTLS.BundleFile != "/opt/svid_bundle.pem" {
-		t.Errorf("BundleFile = %q, want default", cfg.MTLS.BundleFile)
 	}
 }
 
@@ -625,60 +616,126 @@ mtls:
 	}
 }
 
-// CheckPathsReadable returns the missing paths so cmd binaries can
-// emit an early WARN. Cold-start (no files yet) and typo
-// (wrong-path) look the same here; differentiation happens at the
-// log level (the cmd binaries downgrade to WARN to keep cold-start
-// working).
-func TestMTLSConfig_CheckPathsReadable(t *testing.T) {
+// --- SPIFFE config ---
+
+// Load applies SPIFFE defaults that match today's spiffe-helper-driven
+// setup: the SPIRE agent socket path, mirror-files-on, and /opt mirror
+// directory. JWT audience lives on the per-plugin tokenexchange.identity
+// block now, not here.
+func TestSPIFFEConfig_Defaults(t *testing.T) {
 	dir := t.TempDir()
-	existing := filepath.Join(dir, "exists.pem")
-	if err := os.WriteFile(existing, []byte("placeholder"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	path := filepath.Join(dir, "config.yaml")
+	content := `mode: proxy-sidecar
+listener:
+  reverse_proxy_addr: ":8080"
+  forward_proxy_addr: ":8081"
+  reverse_proxy_backend: "http://localhost:8001"
+spiffe: {}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SPIFFE == nil {
+		t.Fatal("SPIFFE block missing")
+	}
+	if cfg.SPIFFE.Socket != "unix:///spiffe-workload-api/spire-agent.sock" {
+		t.Errorf("Socket = %q, want default", cfg.SPIFFE.Socket)
+	}
+	if cfg.SPIFFE.MirrorFiles == nil || !*cfg.SPIFFE.MirrorFiles {
+		t.Error("MirrorFiles should default true")
+	}
+	if cfg.SPIFFE.MirrorDir != "/opt" {
+		t.Errorf("MirrorDir = %q, want /opt", cfg.SPIFFE.MirrorDir)
+	}
+}
 
-	t.Run("nil config", func(t *testing.T) {
-		var cfg *MTLSConfig
-		if got := cfg.CheckPathsReadable(); got != nil {
-			t.Errorf("CheckPathsReadable(nil) = %v, want nil", got)
-		}
-	})
+// SPIFFEConfig.Validate rejects sockets that aren't unix:// URLs. The
+// Workload API only speaks over a unix domain socket in our deployment
+// model; a tcp:// or http:// scheme is almost certainly an operator
+// typo and should fail loud at startup rather than at first dial.
+func TestSPIFFEConfig_Validate_BadSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `mode: proxy-sidecar
+listener:
+  reverse_proxy_addr: ":8080"
+  forward_proxy_addr: ":8081"
+  reverse_proxy_backend: "http://localhost:8001"
+spiffe:
+  socket: "tcp://oops"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected validation error for non-unix:// socket")
+	}
+}
 
-	t.Run("all missing", func(t *testing.T) {
-		cfg := &MTLSConfig{
-			CertFile:   "/nonexistent/svid.pem",
-			KeyFile:    "/nonexistent/svid_key.pem",
-			BundleFile: "/nonexistent/svid_bundle.pem",
-		}
-		got := cfg.CheckPathsReadable()
-		if len(got) != 3 {
-			t.Errorf("expected 3 missing paths, got %d: %v", len(got), got)
-		}
-	})
+// A config that doesn't mention spiffe at all should still load —
+// today's deployments without the new block must keep working.
+func TestSPIFFEConfig_NotPresent_NoError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `mode: proxy-sidecar
+listener:
+  reverse_proxy_addr: ":8080"
+  forward_proxy_addr: ":8081"
+  reverse_proxy_backend: "http://localhost:8001"
+mtls:
+  mode: permissive
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SPIFFE != nil {
+		t.Errorf("SPIFFE should be nil when block not present, got %+v", cfg.SPIFFE)
+	}
+}
 
-	t.Run("partial missing", func(t *testing.T) {
-		cfg := &MTLSConfig{
-			CertFile:   existing,
-			KeyFile:    "/nonexistent/svid_key.pem",
-			BundleFile: existing,
-		}
-		got := cfg.CheckPathsReadable()
-		if len(got) != 1 {
-			t.Errorf("expected 1 missing path, got %d: %v", len(got), got)
-		}
-	})
-
-	t.Run("all present", func(t *testing.T) {
-		cfg := &MTLSConfig{
-			CertFile:   existing,
-			KeyFile:    existing,
-			BundleFile: existing,
-		}
-		got := cfg.CheckPathsReadable()
-		if len(got) != 0 {
-			t.Errorf("expected 0 missing paths, got %d: %v", len(got), got)
-		}
-	})
+// TestLoad_UnknownMTLSFields_Ignored pins back-compat for in-flight chart
+// configs that still carry the legacy mtls.cert_file / key_file / bundle_file
+// keys. After the SPIFFE Provider migration (Task 7) those fields are gone
+// from MTLSConfig, but yaml.v3's default decoder silently drops unknown keys
+// — this test fails loudly if a future change tightens the loader to
+// reject unknowns (e.g. by adding KnownFields(true)) and would otherwise
+// break running deployments mid-migration.
+func TestLoad_UnknownMTLSFields_Ignored(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `mode: proxy-sidecar
+listener:
+  reverse_proxy_addr: ":8080"
+  forward_proxy_addr: ":8081"
+  reverse_proxy_backend: "http://localhost:8001"
+mtls:
+  mode: permissive
+  cert_file: /opt/svid.pem
+  key_file: /opt/svid_key.pem
+  bundle_file: /opt/svid_bundle.pem
+spiffe: {}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load should ignore unknown mtls.cert_file/key_file/bundle_file, got %v", err)
+	}
+	if cfg.MTLS == nil {
+		t.Fatal("mtls block missing after load")
+	}
+	if cfg.MTLS.Mode != MTLSModePermissive {
+		t.Errorf("mtls.mode = %q, want %q", cfg.MTLS.Mode, MTLSModePermissive)
+	}
 }
 
 // Absent mtls block leaves cfg.MTLS nil — today's behavior, no TLS.
@@ -702,3 +759,4 @@ listener:
 		t.Errorf("MTLS = %+v, want nil (absent block)", cfg.MTLS)
 	}
 }
+

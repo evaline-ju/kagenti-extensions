@@ -2,12 +2,11 @@
 set -eu
 
 # AuthBridge envoy-sidecar combined entrypoint with process supervision.
-# Manages: spiffe-helper (optional), authbridge-envoy (ext_proc), envoy.
+# Manages: authbridge-envoy (ext_proc), envoy.
 #
 # Startup order:
-#   1. spiffe-helper (background, only when SPIRE_ENABLED=true)
-#   2. authbridge-envoy (background) — gRPC ext_proc listener
-#   3. envoy (background) — calls authbridge-envoy over ext_proc
+#   1. authbridge-envoy (background) — gRPC ext_proc listener
+#   2. envoy (background) — calls authbridge-envoy over ext_proc
 #
 # Process management: PID 1 (this shell) supervises every long-running
 # critical process. If any critical process exits, the others are killed
@@ -25,14 +24,7 @@ cleanup() {
 }
 trap cleanup TERM INT
 
-# --- Phase 1: spiffe-helper (conditional) ---
-if [ "${SPIRE_ENABLED:-}" = "true" ]; then
-  echo "[entrypoint] Starting spiffe-helper..."
-  /usr/local/bin/spiffe-helper -config=/etc/spiffe-helper/helper.conf run &
-  CRITICAL_PIDS="$CRITICAL_PIDS $!"
-fi
-
-# --- Phase 2: authbridge-envoy (ext_proc gRPC server) ---
+# --- Phase 1: authbridge-envoy (ext_proc gRPC server) ---
 echo "[entrypoint] Starting authbridge-envoy..."
 /usr/local/bin/authbridge-envoy "$@" &
 CRITICAL_PIDS="$CRITICAL_PIDS $!"
@@ -40,7 +32,7 @@ CRITICAL_PIDS="$CRITICAL_PIDS $!"
 # Give authbridge-envoy a moment to bind the gRPC listener before Envoy connects
 sleep 2
 
-# --- Phase 3: Envoy ---
+# --- Phase 2: Envoy ---
 echo "[entrypoint] Starting Envoy..."
 /usr/local/bin/envoy -c /etc/envoy/envoy.yaml \
   --service-cluster auth-proxy --service-node auth-proxy &

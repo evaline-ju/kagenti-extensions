@@ -2,11 +2,10 @@
 set -eu
 
 # AuthBridge proxy-sidecar lite combined entrypoint with process supervision.
-# Manages: spiffe-helper (optional), authbridge-lite.
+# Manages: authbridge-lite.
 #
 # Startup order:
-#   1. spiffe-helper (background, only when SPIRE_ENABLED=true)
-#   2. authbridge-lite (background) — HTTP forward + reverse proxies
+#   1. authbridge-lite (background) — HTTP forward + reverse proxies
 #
 # Process management: PID 1 (this shell) supervises every long-running
 # critical process. If any critical process exits, the others are killed
@@ -24,14 +23,7 @@ cleanup() {
 }
 trap cleanup TERM INT
 
-# --- Phase 1: spiffe-helper (conditional) ---
-if [ "${SPIRE_ENABLED:-}" = "true" ]; then
-  echo "[entrypoint] Starting spiffe-helper..."
-  /usr/local/bin/spiffe-helper -config=/etc/spiffe-helper/helper.conf run &
-  CRITICAL_PIDS="$CRITICAL_PIDS $!"
-fi
-
-# --- Phase 2: authbridge-lite (HTTP forward + reverse proxies) ---
+# --- Phase 1: authbridge-lite (HTTP forward + reverse proxies) ---
 echo "[entrypoint] Starting authbridge-lite..."
 /usr/local/bin/authbridge-lite "$@" &
 CRITICAL_PIDS="$CRITICAL_PIDS $!"
