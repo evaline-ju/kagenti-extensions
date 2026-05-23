@@ -196,12 +196,12 @@ patch-config:  ## Add a2a-parser + ibac to the rendered authbridge ConfigMap (an
 demo-ibac: preflight build-images load-images deploy patch-config  ## Build, load, deploy the demo end-to-end and print next-steps banner
 	@echo
 	@echo "╔══════════════════════════════════════════════════════════╗"
-	@echo "║ ✅ IBAC demo agent ready in $(NAMESPACE)                          ║"
+	@echo "║ ✅ IBAC demo agent ready                                 ║"
 	@echo "║                                                          ║"
 	@echo "║ Open the kagenti UI:                                     ║"
 	@echo "║   http://kagenti-ui.localtest.me:8080                    ║"
 	@echo "║                                                          ║"
-	@echo "║ Pick \`$(AGENT_NAME)\` from the Agents list, then chat:       ║"
+	@echo "║ Pick email-agent from the Agents list, then chat:        ║"
 	@echo "║                                                          ║"
 	@echo "║   \"Summarize my emails.\"                                 ║"
 	@echo "║                                                          ║"
