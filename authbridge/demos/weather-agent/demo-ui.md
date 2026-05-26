@@ -103,24 +103,19 @@ You should also have:
 
 ## Installer-Provided Resources
 
-The Kagenti installer creates everything this demo needs in the target namespace:
+In **`team1`**: `authbridge-config`, `authbridge-runtime-config`, `spiffe-helper-config`,
+`envoy-config`. No extra Secrets or ConfigMaps are required for this demo (outbound
+passthrough; inbound JWT uses issuer/signature checks).
 
-- **`kagenti` realm** in Keycloak
-- **`keycloak-admin-secret`** Secret (Keycloak admin credentials)
-- **`authbridge-config`**, **`authbridge-runtime-config`**, **`spiffe-helper-config`**, **`envoy-config`** ConfigMaps
+**`keycloak-admin-secret` is not in `team1`.** Operator 0.2+ keeps it in
+**`kagenti-system`** for client registration. `NotFound` in `team1` is expected:
 
-No additional Keycloak configuration, Secrets, or ConfigMaps are required for
-this demo. The weather agent uses outbound passthrough (no token exchange), and
-inbound JWT validation works with signature and issuer checks alone.
+```bash
+kubectl get secret keycloak-admin-secret -n kagenti-system
+```
 
-> If your Keycloak admin credentials differ from the default (`admin`/`admin`),
-> update the secret:
-> ```bash
-> kubectl create secret generic keycloak-admin-secret -n team1 \
->   --from-literal=KEYCLOAK_ADMIN_USERNAME=<your-admin-user> \
->   --from-literal=KEYCLOAK_ADMIN_PASSWORD=<your-admin-password> \
->   --dry-run=client -o yaml | kubectl apply -f -
-> ```
+UI login: secret **`kagenti-test-user`** in namespace **`keycloak`** (`admin` + password).
+Realm **`kagenti`** is created by the platform installer.
 
 ---
 
