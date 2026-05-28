@@ -349,6 +349,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		// In picker mode, skip the rate calculation — m.client may be nil
+		// after a back-out. Keep the ticker alive so it's ready when the
+		// user re-enters a session.
+		if m.pane == paneNamespaces || m.pane == panePods {
+			return m, tickCmd()
+		}
 		now := time.Time(msg)
 		// Rate over the last tick.
 		delta := now.Sub(m.lastTick).Seconds()
@@ -386,6 +392,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case refreshTickMsg:
+		// In picker mode, skip the fetch — m.client may be nil after a
+		// back-out. Keep the ticker alive so it's ready when the user
+		// re-enters a session.
+		if m.pane == paneNamespaces || m.pane == panePods {
+			return m, refreshTickCmd()
+		}
 		return m, tea.Batch(m.loadSessionsCmd(), refreshTickCmd())
 
 	case pipelineLoadedMsg:
@@ -402,6 +414,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamMsg:
+		// In picker mode, m.streamCh is nil (cleared by backToPodsPane) and
+		// m.handleStreamEvent would mutate stale state. Drop late-arriving
+		// events from the previous session.
+		if m.pane == paneNamespaces || m.pane == panePods {
+			return m, nil
+		}
 		ev := apiclient.StreamEvent(msg)
 		m.handleStreamEvent(ev)
 		// Re-pump the same channel for the next message. A single apiclient
@@ -409,6 +427,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, streamPump(m.streamCh)
 
 	case streamClosedMsg:
+		// In picker mode, ignore the close from the previous session —
+		// there is no stream to reconnect and flipping connState would
+		// leave stale "reconnecting" state visible when the user picks a
+		// new pod.
+		if m.pane == paneNamespaces || m.pane == panePods {
+			return m, nil
+		}
 		m.connState.phase = connReconnecting
 		return m, nil
 

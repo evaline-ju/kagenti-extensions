@@ -247,5 +247,41 @@ func TestEscFromSessionsNoOpInBypassMode(t *testing.T) {
 	}
 }
 
+func TestRefreshTickAfterEscDoesNotPanic(t *testing.T) {
+	pf := &fakePortForwarder{endpoint: "http://127.0.0.1:60002"}
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, pf)
+	// Drill all the way to paneSessions.
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+	if mm.pane != paneSessions {
+		t.Fatalf("setup failed: not in paneSessions, got %v", mm.pane)
+	}
+	// Esc back to Pods. m.client is now nil.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	if mm.pane != panePods {
+		t.Fatalf("after Esc, expected panePods, got %v", mm.pane)
+	}
+	// A late refreshTickMsg should not panic.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("tick/stream msg in picker pane panicked: %v", r)
+		}
+	}()
+	_, _ = mm.Update(refreshTickMsg(time.Now()))
+	// A late tickMsg should not panic.
+	_, _ = mm.Update(tickMsg(time.Now()))
+	// A late streamMsg should not panic.
+	_, _ = mm.Update(streamMsg{})
+	// A late streamClosedMsg should not panic.
+	_, _ = mm.Update(streamClosedMsg{})
+}
+
 // silence unused-import nag if test build trims this file later
 var _ = time.Second
