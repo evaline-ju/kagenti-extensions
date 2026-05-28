@@ -286,6 +286,93 @@ func TestOnRequest_NoIntent_FailsClosed(t *testing.T) {
 	}
 }
 
+// Nil Session must not panic. The forward-proxy listener leaves
+// pctx.Session nil whenever no inbound A2A request has seeded the
+// active session bucket yet — common at agent startup. Treat it as
+// a distinct fail-closed reason (no_session) so dashboards can tell
+// "no inbound has happened yet" apart from "session exists but
+// contains no intent" (no_intent).
+func TestOnRequest_NilSession_FailsClosed(t *testing.T) {
+	fj := &fakeJudge{}
+	p := newConfiguredIBAC(t, fj)
+
+	pctx := makePCtx(t)
+	pctx.Session = nil // before any inbound A2A
+	action := invokeOnRequest(p, pctx)
+
+	if action.Type != pipeline.Reject {
+		t.Errorf("got %v, want Reject when Session is nil", action.Type)
+	}
+	if fj.calls != 0 {
+		t.Errorf("judge should not be called when there's no session")
+	}
+	inv := lastInvocation(t, pctx)
+	if inv.Reason != "no_session" {
+		t.Errorf("Invocation reason = %q, want 'no_session'", inv.Reason)
+	}
+}
+
+// MCP protocol-housekeeping methods carry no user-actionable intent
+// (they're connection setup or capability discovery, not side
+// effects). IBAC must skip them; otherwise every agent that opens an
+// MCP connection at startup gets blocked before any user turn.
+func TestOnRequest_MCPHousekeepingBypass(t *testing.T) {
+	cases := []string{
+		"initialize",
+		"ping",
+		"tools/list",
+		"prompts/list",
+		"resources/list",
+		"resources/templates/list",
+		"completion/complete",
+		"logging/setLevel",
+		"notifications/initialized",
+		"notifications/cancelled",
+	}
+	for _, method := range cases {
+		t.Run(method, func(t *testing.T) {
+			fj := &fakeJudge{}
+			p := newConfiguredIBAC(t, fj)
+
+			pctx := makePCtx(t)
+			pctx.Session = nil // housekeeping must bypass before the session check
+			pctx.Method = "POST"
+			pctx.Host = "some-mcp-server"
+			pctx.Path = "/mcp"
+			pctx.Extensions.MCP = &pipeline.MCPExtension{Method: method}
+			action := invokeOnRequest(p, pctx)
+
+			if action.Type != pipeline.Continue {
+				t.Errorf("got %v, want Continue for housekeeping method %q", action.Type, method)
+			}
+			if fj.calls != 0 {
+				t.Errorf("judge should not be called for housekeeping method %q", method)
+			}
+		})
+	}
+}
+
+// MCP tools/call must NOT be treated as housekeeping — it's the
+// canonical side-effect method IBAC exists to judge.
+func TestOnRequest_MCPToolsCallIsNotHousekeeping(t *testing.T) {
+	fj := &fakeJudge{verdict: "allow"}
+	p := newConfiguredIBAC(t, fj)
+
+	pctx := makePCtx(t)
+	pctx.Method = "POST"
+	pctx.Host = "user-tool"
+	pctx.Path = "/mcp"
+	pctx.Extensions.MCP = &pipeline.MCPExtension{
+		Method: "tools/call",
+		Params: map[string]any{"name": "delete_user"},
+	}
+	_ = invokeOnRequest(p, pctx)
+
+	if fj.calls != 1 {
+		t.Errorf("judge calls = %d, want 1 (tools/call must be judged)", fj.calls)
+	}
+}
+
 // Email-poison parity: this is the canonical case the plugin exists
 // for. Raw HTTP exfiltration to an unknown server, no MCP/Inference
 // extensions, judge denies → 403. This test is the contract that

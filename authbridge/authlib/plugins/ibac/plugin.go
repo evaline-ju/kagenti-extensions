@@ -12,8 +12,10 @@
 //
 // Per-request only — no cross-request session-scoped state. Requires
 // an a2a-parser in the inbound chain (runtime dependency, fail-closed
-// when LastIntent is nil) and works alongside an optional mcp-parser
-// (After ordering hint) for richer action descriptions.
+// when LastIntent is nil or no session has been seeded yet) and works
+// alongside an optional mcp-parser (After ordering hint) for richer
+// action descriptions and to bypass MCP protocol housekeeping
+// (initialize, *list, notifications/*) that carries no intent.
 package ibac
 
 import (
@@ -245,10 +247,40 @@ func (p *IBAC) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.A
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	// 5. Pull the user's most recent declared intent. nil here means
-	//    either a2a-parser isn't in the inbound chain, or no user
-	//    message has been received yet — both are operator-error /
-	//    suspicious states. Fail closed.
+	// 5. MCP protocol-housekeeping skip. initialize / notifications /
+	//    *list methods are connection setup and capability discovery —
+	//    they happen before any user request (e.g. agent startup) and
+	//    carry no actionable intent. Same shape as inference_bypass:
+	//    judging them would be a category error, and denying them
+	//    breaks every agent that opens an MCP connection at startup.
+	//    Only methods that invoke side effects (tools/call, prompts/get,
+	//    resources/read) reach the judge.
+	if pctx.Extensions.MCP != nil && isMCPHousekeeping(pctx.Extensions.MCP.Method) {
+		pctx.Skip("mcp_housekeeping")
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	// 6. Pull the user's most recent declared intent. Two distinct
+	//    nil pathways, both fail closed but with different reasons so
+	//    operator dashboards can tell them apart:
+	//      - no_session: no inbound A2A request has populated the
+	//        active session bucket yet (or session tracking is off
+	//        entirely). Common at agent startup before any user turn.
+	//      - no_intent: a session exists but contains no extractable
+	//        user message (a2a-parser missing from inbound chain, or
+	//        events present but none are user-role A2A requests).
+	if pctx.Session == nil {
+		action := describeAction(pctx, p.cfg.JudgeInference)
+		pctx.Record(pipeline.Invocation{
+			Action: pipeline.ActionDeny,
+			Phase:  pipeline.InvocationPhaseRequest,
+			Reason: "no_session",
+			Details: map[string]string{
+				"action": action,
+			},
+		})
+		return pipeline.DenyStatus(403, "ibac.no_session", "no active session for outbound request")
+	}
 	intent := pctx.Session.LastIntent()
 	intentText := extractIntentText(intent)
 	if intentText == "" {
@@ -430,6 +462,32 @@ func formatBodyExcerpt(body []byte, n int) string {
 		}
 	}
 	return fmt.Sprintf("%q", string(body))
+}
+
+// isMCPHousekeeping reports whether an MCP method is connection-setup
+// or capability-discovery traffic that carries no user-actionable
+// intent. These methods fire before any user turn (e.g. an agent's
+// startup `initialize` against its MCP tool server) and judging them
+// would either panic on a nil session or deny on no_intent — both
+// break agents that open MCP connections at startup. Only side-effect
+// methods (tools/call, prompts/get, resources/read) reach the judge.
+//
+// JSON-RPC notifications (any method starting with `notifications/`)
+// are also bypassed: they're one-way protocol signals, never tied to
+// a specific user turn.
+func isMCPHousekeeping(method string) bool {
+	switch method {
+	case "initialize",
+		"ping",
+		"tools/list",
+		"prompts/list",
+		"resources/list",
+		"resources/templates/list",
+		"completion/complete",
+		"logging/setLevel":
+		return true
+	}
+	return strings.HasPrefix(method, "notifications/")
 }
 
 // extractMCPToolName pulls the tool name from a tools/call request's
