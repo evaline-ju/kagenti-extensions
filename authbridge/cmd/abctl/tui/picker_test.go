@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
 )
 
@@ -192,6 +193,58 @@ func TestRunOptionsWiringEndpointBypass(t *testing.T) {
 	// Run will exit because ctx is already cancelled; we just verify
 	// it doesn't dereference nil Lister/PortForwarder.
 	_ = Run(ctx, opts)
+}
+
+func TestEscFromSessionsReturnsToPods(t *testing.T) {
+	pf := &fakePortForwarder{endpoint: "http://127.0.0.1:60001"}
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, pf)
+	// Drill: agents loaded → namespaces → pods → port-forward → sessions
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+	if mm.pane != paneSessions {
+		t.Fatalf("setup failed: not in paneSessions, got %v", mm.pane)
+	}
+	if mm.activePF == nil {
+		t.Fatal("setup failed: activePF should be set")
+	}
+
+	// Esc from Sessions should return to Pods.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	if mm.pane != panePods {
+		t.Fatalf("after Esc, pane should be panePods, got %v", mm.pane)
+	}
+	if mm.activePF != nil {
+		t.Fatal("activePF should have been closed and cleared")
+	}
+	if pf.closeCount != 1 {
+		t.Fatalf("PortForward.Close should have been called once, got %d", pf.closeCount)
+	}
+	if mm.client != nil {
+		t.Fatal("m.client should have been cleared")
+	}
+	if mm.cancel == nil {
+		t.Fatal("m.cancel should have been re-derived from parentCtx, not left nil")
+	}
+}
+
+func TestEscFromSessionsNoOpInBypassMode(t *testing.T) {
+	// Build a bypass-mode model directly (no picker).
+	ctx := context.Background()
+	c := apiclient.New("http://127.0.0.1:1")
+	m := New(ctx, c).(*model)
+	// No parentCtx. Esc on paneSessions should be a no-op.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm := updated.(*model)
+	if mm.pane != paneSessions {
+		t.Fatalf("bypass mode Esc should NOT change pane, got %v", mm.pane)
+	}
 }
 
 // silence unused-import nag if test build trims this file later

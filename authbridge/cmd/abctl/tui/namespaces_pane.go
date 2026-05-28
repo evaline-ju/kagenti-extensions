@@ -51,6 +51,7 @@ func loadAgentsCmd(ctx context.Context, lister cluster.Lister) tea.Cmd {
 // transitioning to paneSessions after a port-forward is established
 // finds all fields ready.
 func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortForwarder) *model {
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 
 	ti := textinput.New()
@@ -59,6 +60,7 @@ func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortF
 
 	return &model{
 		// endpoint and client are set later, when portForwardReadyMsg arrives.
+		parentCtx:   parentCtx,
 		ctx:         ctx,
 		cancel:      cancel,
 		events:      make(map[string][]pipeline.SessionEvent),

@@ -121,6 +121,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 	case "esc", "left", "h":
 		// Back-out: plugin-detail → pipeline; detail → events; events → sessions.
+		// In picker mode, sessions → pods (tearing down PF + SSE).
 		switch m.pane {
 		case panePluginDetail:
 			m.pane = panePipeline
@@ -128,6 +129,13 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.pane = paneEvents
 		case paneEvents:
 			m.pane = paneSessions
+		case paneSessions:
+			// Picker mode: back to Pods pane, tearing down the current
+			// port-forward + SSE stream. Bypass mode: no-op (parentCtx
+			// is nil; nowhere to go back to).
+			if m.parentCtx != nil {
+				m.backToPodsPane()
+			}
 		}
 		return nil
 

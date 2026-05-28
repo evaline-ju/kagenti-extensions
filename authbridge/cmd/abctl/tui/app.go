@@ -106,6 +106,12 @@ type model struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// parentCtx is the un-cancelled root ctx the picker was constructed
+	// with. Used to derive a fresh m.ctx / m.cancel when the user backs
+	// out of a session view to switch pods. Nil in bypass mode (no picker)
+	// — Esc-from-Sessions is a no-op there.
+	parentCtx context.Context
+
 	// Data caches.
 	sessions []session.SessionSummary
 	events   map[string][]pipeline.SessionEvent // sessionID → ring buffer
@@ -219,6 +225,47 @@ func (m *model) initSessionView() tea.Cmd {
 		tickCmd(),
 		refreshTickCmd(),
 	)
+}
+
+// backToPodsPane returns the picker to the Pods pane, tearing down the
+// current session view (SSE pump, ticks) and port-forward. The pod list
+// is preserved so the user picks a different pod immediately. A fresh
+// ctx / cancel is derived from m.parentCtx so the next session-view
+// entry has a usable context.
+func (m *model) backToPodsPane() {
+	// Cancel current ctx — stops the SSE goroutine and any in-flight
+	// session/pipeline fetches.
+	if m.cancel != nil {
+		m.cancel()
+	}
+	// Close the active PF (also waits for stderr-drain to flush).
+	if m.activePF != nil {
+		_ = m.activePF.Close()
+		m.activePF = nil
+	}
+
+	// Reset session-view state so the next pod starts fresh.
+	m.client = nil
+	m.streamCh = nil
+	m.sessions = nil
+	m.events = make(map[string][]pipeline.SessionEvent)
+	m.eventCt = 0
+	m.lastCt = 0
+	m.rate = 0
+	m.drops = 0
+	m.pipeline = nil
+	m.detailEvent = nil
+	m.detailPlugin = nil
+	m.selectedSess = ""
+	m.filter = ""
+	m.filtering = false
+	m.visibleRows = nil
+	m.connState = connStateInfo{phase: connConnecting}
+
+	// Re-derive ctx for the next session view.
+	m.ctx, m.cancel = context.WithCancel(m.parentCtx)
+
+	m.pane = panePods
 }
 
 // Init fires the initial fetch + starts the SSE pump and the tick.
