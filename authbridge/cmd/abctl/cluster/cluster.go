@@ -114,7 +114,7 @@ func defaultRunner(ctx context.Context, args ...string) ([]byte, error) {
 	if err != nil {
 		// exec.ExitError carries the stderr we want to surface.
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("kubectl: %s", strings.TrimSpace(string(ee.Stderr)))
+			return nil, fmt.Errorf("kubectl: %w: %s", ee, strings.TrimSpace(string(ee.Stderr)))
 		}
 		return nil, fmt.Errorf("kubectl: %w", err)
 	}
@@ -122,8 +122,8 @@ func defaultRunner(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // Lister enumerates AuthBridge-bearing pods in the cluster, grouped by
-// namespace. Implementations are safe to call concurrently from a single
-// goroutine context — the picker calls ListAgents once per pane entry.
+// namespace. Not safe for concurrent calls from multiple goroutines —
+// the picker calls ListAgents from a single goroutine per pane entry.
 type Lister interface {
 	ListAgents(ctx context.Context) ([]AgentNamespace, error)
 }
