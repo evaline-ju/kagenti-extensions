@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -65,5 +67,43 @@ func TestParseAgentPodsRejectsBadJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("error should mention decode failure, got %v", err)
+	}
+}
+
+func TestKubectlListerListAgents(t *testing.T) {
+	stub := func(ctx context.Context, args ...string) ([]byte, error) {
+		// Verify the args we pass kubectl.
+		want := []string{"get", "pods", "-A", "-o", "json"}
+		if len(args) != len(want) {
+			t.Fatalf("kubectl args: got %v want %v", args, want)
+		}
+		for i := range want {
+			if args[i] != want[i] {
+				t.Fatalf("kubectl args[%d]: got %q want %q", i, args[i], want[i])
+			}
+		}
+		return []byte(fixturePodsJSON), nil
+	}
+	l := &kubectlLister{run: stub}
+	got, err := l.ListAgents(context.Background())
+	if err != nil {
+		t.Fatalf("ListAgents: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 namespaces, got %d", len(got))
+	}
+}
+
+func TestKubectlListerSurfacesRunnerError(t *testing.T) {
+	stub := func(ctx context.Context, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("kubectl: forbidden")
+	}
+	l := &kubectlLister{run: stub}
+	_, err := l.ListAgents(context.Background())
+	if err == nil {
+		t.Fatal("want error from runner to surface")
+	}
+	if !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("error should include runner output, got %v", err)
 	}
 }

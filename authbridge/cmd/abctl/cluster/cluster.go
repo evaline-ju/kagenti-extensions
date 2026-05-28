@@ -4,9 +4,12 @@
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -98,4 +101,42 @@ func parseAgentPods(raw []byte) ([]AgentNamespace, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// runner abstracts a `kubectl <args>` invocation. Production uses os/exec;
+// tests inject their own.
+type runner func(ctx context.Context, args ...string) ([]byte, error)
+
+// defaultRunner shells out to the system `kubectl`.
+func defaultRunner(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		// exec.ExitError carries the stderr we want to surface.
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("kubectl: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("kubectl: %w", err)
+	}
+	return out, nil
+}
+
+// Lister enumerates AuthBridge-bearing pods in the cluster, grouped by
+// namespace. Implementations are safe to call concurrently from a single
+// goroutine context — the picker calls ListAgents once per pane entry.
+type Lister interface {
+	ListAgents(ctx context.Context) ([]AgentNamespace, error)
+}
+
+// NewLister returns a Lister that shells out to the system `kubectl`.
+func NewLister() Lister { return &kubectlLister{run: defaultRunner} }
+
+type kubectlLister struct{ run runner }
+
+func (l *kubectlLister) ListAgents(ctx context.Context) ([]AgentNamespace, error) {
+	out, err := l.run(ctx, "get", "pods", "-A", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	return parseAgentPods(out)
 }
