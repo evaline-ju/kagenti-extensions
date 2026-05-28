@@ -10,6 +10,50 @@ import (
 // handleKey processes every key press. The filter-input overlay takes
 // precedence; otherwise keys are dispatched based on the active pane.
 func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
+	// Picker panes handle their own keys before session-view logic.
+	if m.pane == paneNamespaces {
+		switch msg.String() {
+		case "enter":
+			if cur := m.namespacesTbl.Cursor(); cur < len(m.namespaces) {
+				m.selectedNamespace = m.namespaces[cur].Name
+				m.pane = panePods
+				m.rebuildPodsTable()
+			}
+			return nil
+		case "q", "esc", "ctrl+c":
+			return tea.Quit
+		}
+		var cmd tea.Cmd
+		m.namespacesTbl, cmd = m.namespacesTbl.Update(msg)
+		return cmd
+	}
+
+	if m.pane == panePods {
+		switch msg.String() {
+		case "enter":
+			pods := m.currentPodsList()
+			if cur := m.podsTbl.Cursor(); cur < len(pods) {
+				if !pods[cur].Ready {
+					m.pickerErr = "pod not Ready"
+					return nil
+				}
+				m.selectedPod = pods[cur].Name
+				// Task 7 wires the port-forward + session-view transition.
+				return nil
+			}
+			return nil
+		case "esc":
+			m.pane = paneNamespaces
+			m.pickerErr = ""
+			return nil
+		case "q", "ctrl+c":
+			return tea.Quit
+		}
+		var cmd tea.Cmd
+		m.podsTbl, cmd = m.podsTbl.Update(msg)
+		return cmd
+	}
+
 	// Filter-mode: input box consumes most keys. Esc cancels, Enter commits.
 	if m.filtering {
 		switch msg.String() {
@@ -222,6 +266,10 @@ func (m *model) helpView() string {
 		return "type to filter · [enter] commit · [esc] cancel"
 	}
 	switch m.pane {
+	case paneNamespaces:
+		return "[↑↓/jk] nav  [↵] open  [q] quit"
+	case panePods:
+		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [q] quit"
 	case paneSessions:
 		return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [q] quit"
 	case paneEvents:

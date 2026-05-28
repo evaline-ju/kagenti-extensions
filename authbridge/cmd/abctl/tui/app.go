@@ -18,13 +18,16 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
 )
 
 // Pane identifiers.
 type paneID int
 
 const (
-	paneSessions paneID = iota
+	paneNamespaces paneID = iota
+	panePods
+	paneSessions
 	paneEvents
 	paneDetail
 	panePipeline
@@ -78,6 +81,13 @@ type streamClosedMsg struct{}
 type errMsg struct {
 	where string
 	err   error
+}
+
+// agentsLoadedMsg carries the result of Lister.ListAgents from the picker
+// loader Cmd.
+type agentsLoadedMsg struct {
+	namespaces []cluster.AgentNamespace
+	err        error
 }
 
 // Model is the top-level Bubble Tea model.
@@ -145,6 +155,19 @@ type model struct {
 	// streamCh is the single SSE channel from the apiclient. Opened once
 	// in Init; re-pumped on every streamMsg until it closes.
 	streamCh <-chan apiclient.StreamEvent
+
+	// Picker dependencies and state. nil + empty when --endpoint bypasses
+	// the picker.
+	lister        cluster.Lister
+	portForwarder cluster.PortForwarder
+	namespaces    []cluster.AgentNamespace
+	namespacesTbl table.Model
+	podsTbl       table.Model
+
+	selectedNamespace string // set on Enter from Namespaces pane
+	selectedPod       string // set on Enter from Pods pane
+
+	pickerErr string // single-line picker error shown in footer
 }
 
 // New returns a fresh model pointed at the given client. ctx governs both
@@ -175,6 +198,10 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 
 // Init fires the initial fetch + starts the SSE pump and the tick.
 func (m *model) Init() tea.Cmd {
+	if m.pane == paneNamespaces {
+		// Picker mode — load agents, then idle until user picks a pod.
+		return loadAgentsCmd(m.lister)
+	}
 	m.streamCh = m.client.Stream(m.ctx, "")
 	return tea.Batch(
 		m.loadSessionsCmd(),
@@ -334,6 +361,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connState.err = msg.err
 		return m, nil
 
+	case agentsLoadedMsg:
+		if msg.err != nil {
+			m.pickerErr = msg.err.Error()
+			return m, nil
+		}
+		m.namespaces = msg.namespaces
+		m.rebuildNamespacesTable()
+		return m, nil
+
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
 	}
@@ -408,6 +444,32 @@ sortAndRebuild:
 
 // View composes the full screen.
 func (m *model) View() string {
+	if m.pane == paneNamespaces {
+		title := "abctl · pick namespace"
+		body := m.namespacesTbl.View()
+		footer := "[↑↓/jk] nav  [↵] open  [q] quit"
+		if m.pickerErr != "" {
+			footer = "error: " + m.pickerErr + "    " + footer
+		}
+		return lipgloss.JoinVertical(lipgloss.Left,
+			styleTitle.Render(title),
+			body,
+			styleHint.Render(footer),
+		)
+	}
+	if m.pane == panePods {
+		title := "abctl · " + m.selectedNamespace + " · pick pod"
+		body := m.podsTbl.View()
+		footer := "[↑↓/jk] nav  [↵] connect  [Esc] back  [q] quit"
+		if m.pickerErr != "" {
+			footer = "error: " + m.pickerErr + "    " + footer
+		}
+		return lipgloss.JoinVertical(lipgloss.Left,
+			styleTitle.Render(title),
+			body,
+			styleHint.Render(footer),
+		)
+	}
 	if m.width == 0 {
 		return "initializing…"
 	}
