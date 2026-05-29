@@ -432,8 +432,10 @@ type consumerPlugin struct {
 	setProvider *spiffe.Provider
 }
 
-func (p *consumerPlugin) Name() string                              { return p.name }
-func (p *consumerPlugin) Capabilities() pipeline.PluginCapabilities { return pipeline.PluginCapabilities{} }
+func (p *consumerPlugin) Name() string { return p.name }
+func (p *consumerPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
 func (p *consumerPlugin) OnRequest(context.Context, *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -611,5 +613,64 @@ func TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 	_, ok = plugins[1].(pipeline.RawConfigProvider)
 	if ok {
 		t.Fatal("non-Configurable plugin should NOT be wrapped")
+	}
+}
+
+// TestCatalog_IncludesRegisteredPlugins verifies Catalog() walks the
+// registry, calls each factory once, and returns sorted CatalogEntries
+// carrying the static capabilities each plugin advertises.
+func TestCatalog_IncludesRegisteredPlugins(t *testing.T) {
+	const a, b = "test-catalog-a", "test-catalog-b"
+	RegisterPlugin(a, func() pipeline.Plugin {
+		return &relPlugin{
+			name: a,
+			caps: pipeline.PluginCapabilities{
+				Description: "A plugin",
+				Writes:      []string{"out-a"},
+			},
+		}
+	})
+	t.Cleanup(func() { UnregisterPlugin(a) })
+	RegisterPlugin(b, func() pipeline.Plugin {
+		return &relPlugin{
+			name: b,
+			caps: pipeline.PluginCapabilities{
+				Description: "B plugin",
+				Reads:       []string{"out-a"},
+				Requires:    []string{a},
+			},
+		}
+	})
+	t.Cleanup(func() { UnregisterPlugin(b) })
+
+	entries := Catalog()
+	got := map[string]pipeline.PluginCapabilities{}
+	for _, e := range entries {
+		got[e.Name] = e.Capabilities
+	}
+
+	if got[a].Description != "A plugin" {
+		t.Fatalf("Catalog missing %s with Description: %+v", a, got[a])
+	}
+	if got[b].Description != "B plugin" {
+		t.Fatalf("Catalog missing %s with Description: %+v", b, got[b])
+	}
+	if len(got[b].Requires) != 1 || got[b].Requires[0] != a {
+		t.Fatalf("Catalog %s.Requires lost: %+v", b, got[b].Requires)
+	}
+
+	// Sorted order: walk entries and confirm a < b appear in that order
+	// (relative position only — other tests may register plugins).
+	idxA, idxB := -1, -1
+	for i, e := range entries {
+		if e.Name == a {
+			idxA = i
+		}
+		if e.Name == b {
+			idxB = i
+		}
+	}
+	if idxA == -1 || idxB == -1 || idxA > idxB {
+		t.Fatalf("Catalog not sorted: a@%d b@%d", idxA, idxB)
 	}
 }

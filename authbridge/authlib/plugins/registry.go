@@ -80,6 +80,37 @@ func RegisteredPlugins() []string {
 	return names
 }
 
+// CatalogEntry pairs a registered plugin's name with the capabilities
+// it advertises. Surfaces in `abctl`'s catalog pane and in the
+// /v1/plugins endpoint so operators can see what plugins exist and
+// what each one needs without reading source.
+type CatalogEntry struct {
+	Name         string
+	Capabilities pipeline.PluginCapabilities
+}
+
+// Catalog returns a sorted snapshot of every registered plugin's
+// capabilities. Each factory is called once with no config; the
+// resulting instance's Capabilities() is the static type-level
+// metadata that the rest of the framework also reads.
+//
+// Constructors must therefore be cheap (allocate the struct, nothing
+// more) — heavy work belongs in Init() after Configure() has run. The
+// godoc on PluginCapabilities documents this constraint.
+func Catalog() []CatalogEntry {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]CatalogEntry, 0, len(registry))
+	for name, factory := range registry {
+		out = append(out, CatalogEntry{
+			Name:         name,
+			Capabilities: factory().Capabilities().Normalize(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // factoryFor looks up a factory by name. Internal to the package.
 // Callers under Build use this to resolve config entries into plugin
 // instances.
