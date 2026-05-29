@@ -31,7 +31,14 @@ func (m *model) showPluginDetail(p *apiclient.PipelinePlugin) {
 	fmt.Fprintf(&b, "%s %s\n", styleMuted.Render("Body:     "), body)
 	fmt.Fprintf(&b, "%s %d events in cached sessions\n", styleMuted.Render("Activity: "), counts[p.Name])
 	fmt.Fprintln(&b)
-	b.WriteString(styleHint.Render("(per-plugin runtime config will be added when the Plugin interface\nexposes a Config() method — tracked as a follow-up.)"))
+	b.WriteString(styleMuted.Render("Config:    "))
+	if len(p.Config) == 0 {
+		b.WriteString(" (none)\n")
+	} else {
+		b.WriteString("\n")
+		b.WriteString(ColorizeJSONBytes(p.Config))
+		b.WriteString("\n")
+	}
 
 	m.detailVp.SetContent(b.String())
 	m.detailVp.GotoTop()
