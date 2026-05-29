@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -14,11 +15,13 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"gopkg.in/yaml.v3"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
 )
 
 // Pane identifiers.
@@ -97,6 +100,10 @@ type portForwardReadyMsg struct {
 	endpoint string
 	err      error
 }
+
+// editorExitedMsg is sent by openEditorCmd when the user's $EDITOR
+// process exits. err is nil on a clean (0) exit.
+type editorExitedMsg struct{ err error }
 
 // Model is the top-level Bubble Tea model.
 type model struct {
@@ -191,6 +198,19 @@ type model struct {
 	// activePF is the live port-forward tunnel, if any. Closed on pod-switch
 	// or quit.
 	activePF cluster.PortForward
+
+	// editState tracks an in-flight pipeline edit (the "e" flow).
+	// editState.phase == editPhaseDone means no edit is active.
+	editState editState
+
+	// statusURL is the agent's :9093 stat-server URL via the picker's
+	// port-forward; populated by portForwardReadyMsg. Used by edit.PollCmd
+	// to watch /reload/status.
+	statusURL string
+
+	// editRunner is the kubectl Runner the edit flow uses for fetch/apply.
+	// Set in newPickerModel to edit.DefaultRunner; tests inject a stub.
+	editRunner edit.Runner
 }
 
 // New returns a fresh model pointed at the given client. ctx governs both
@@ -495,9 +515,74 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.activePF = msg.pf
 		m.endpoint = msg.endpoint
+		m.statusURL = msg.pf.StatusEndpoint()
 		m.client = apiclient.New(m.endpoint)
 		m.pane = paneSessions
 		return m, m.initSessionView()
+
+	case edit.FetchedMsg:
+		if msg.Err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = msg.Err.Error()
+			return m, nil
+		}
+		m.editState.fetched = msg.Fetched
+		m.editState.tempPath = msg.TempPath
+		m.editState.phase = editPhaseEditing
+		return m, openEditorCmd(msg.TempPath)
+
+	case editorExitedMsg:
+		if msg.err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = "editor exited: " + msg.err.Error()
+			return m, nil
+		}
+		edited, err := os.ReadFile(m.editState.tempPath)
+		if err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = "read edited file: " + err.Error()
+			return m, nil
+		}
+		m.editState.editedRaw = edited
+		originalSubtree := m.editState.fetched.InnerYAML[m.editState.fetched.PipelineStart:m.editState.fetched.PipelineEnd]
+		if string(edited) == string(originalSubtree) {
+			m.editState = editState{phase: editPhaseDone}
+			return m, nil
+		}
+		if !validYAML(edited) {
+			m.editState.phase = editPhaseError
+			m.editState.err = "edited file is not valid YAML"
+			return m, nil
+		}
+		m.editState.diff = edit.Diff(originalSubtree, edited)
+		m.editState.phase = editPhaseDiff
+		return m, nil
+
+	case edit.AppliedMsg:
+		if msg.Err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = "apply failed: " + msg.Err.Error()
+			return m, nil
+		}
+		m.editState.applyTime = msg.ApplyTime
+		m.editState.phase = editPhaseWaiting
+		return m, edit.PollCmd(m.ctx, m.statusURL, msg.ApplyTime)
+
+	case edit.PolledMsg:
+		switch msg.Result.Status {
+		case edit.PollSuccess:
+			m.editState = editState{phase: editPhaseDone}
+			return m, m.loadPipelineCmd()
+		case edit.PollFailure:
+			m.editState.phase = editPhaseError
+			m.editState.err = "reload failed: " + msg.Result.LastError
+			return m, nil
+		case edit.PollTimeout:
+			m.editState.phase = editPhaseError
+			m.editState.err = "reload not observed in 120s; check kubectl logs"
+			return m, nil
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
@@ -573,6 +658,11 @@ sortAndRebuild:
 
 // View composes the full screen.
 func (m *model) View() string {
+	// Edit overlay takes over the screen while an edit is in flight.
+	if m.editState.phase != editPhaseDone {
+		return renderEditOverlay(m.editState, m.width, m.height)
+	}
+
 	if m.pane == paneNamespaces {
 		title := "abctl · pick namespace"
 		// m.namespaces == nil → still loading (don't flash the empty-state
@@ -752,4 +842,23 @@ func Run(ctx context.Context, opts RunOptions) error {
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
+}
+
+// openEditorCmd returns a tea.Cmd that suspends bubbletea, runs $EDITOR
+// (vi if unset) on path, and emits editorExitedMsg when the editor exits.
+func openEditorCmd(path string) tea.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	c := exec.Command("sh", "-c", editor+" "+path)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return editorExitedMsg{err: err}
+	})
+}
+
+// validYAML returns true iff b parses as valid YAML.
+func validYAML(b []byte) bool {
+	var v any
+	return yaml.Unmarshal(b, &v) == nil
 }

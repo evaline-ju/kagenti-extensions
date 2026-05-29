@@ -12,6 +12,7 @@ import (
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
 )
 
 // newNamespacesTable builds an empty namespaces picker table.
@@ -78,5 +79,8 @@ func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortF
 		portForwarder: pf,
 		namespacesTbl: newNamespacesTable(),
 		podsTbl:       newPodsTable(),
+
+		// Edit flow:
+		editRunner: edit.DefaultRunner,
 	}
 }

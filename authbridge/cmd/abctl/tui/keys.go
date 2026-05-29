@@ -5,6 +5,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
 )
 
 // handleKey processes every key press. The filter-input overlay takes
@@ -73,6 +75,11 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		var cmd tea.Cmd
 		m.podsTbl, cmd = m.podsTbl.Update(msg)
 		return cmd
+	}
+
+	// Edit overlay takes over key input while an edit is in flight.
+	if m.editState.phase != editPhaseDone {
+		return m.handleEditKey(msg)
 	}
 
 	// Filter-mode: input box consumes most keys. Esc cancels, Enter commits.
@@ -198,6 +205,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 
+	case "e":
+		if m.pane != panePipeline {
+			return nil
+		}
+		if m.editState.phase != editPhaseDone {
+			return nil // already editing
+		}
+		m.editState = editState{phase: editPhaseFetching}
+		return edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod)
+
 	case "g":
 		m.goTop()
 		return nil
@@ -320,9 +337,9 @@ func (m *model) helpView() string {
 		return "[↑↓] scroll  [y] yank  [esc] back  [q] quit"
 	case panePipeline:
 		if m.parentCtx != nil {
-			return "[↑↓] nav  [↵] plugin detail  [tab] sessions  [esc] pods  [q] quit"
+			return "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [esc] pods  [q] quit"
 		}
-		return "[↑↓] nav  [↵] plugin detail  [tab] sessions  [q] quit"
+		return "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [q] quit"
 	case panePluginDetail:
 		return "[↑↓] scroll  [esc] back  [q] quit"
 	}
@@ -363,4 +380,49 @@ func (m *model) layout() {
 	if m.detailEvent != nil {
 		m.showDetail(m.detailEvent)
 	}
+}
+
+// handleEditKey is the keymap that takes over while an edit is in flight.
+func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
+	switch m.editState.phase {
+	case editPhaseDiff:
+		switch msg.String() {
+		case "y", "Y":
+			m.editState.phase = editPhaseApplying
+			newSubtree := m.editState.editedRaw
+			newInner := edit.Splice(
+				m.editState.fetched.InnerYAML,
+				m.editState.fetched.PipelineStart,
+				m.editState.fetched.PipelineEnd,
+				newSubtree,
+			)
+			manifest, err := edit.BuildManifest(m.editState.fetched.ConfigMapYAML, newInner)
+			if err != nil {
+				m.editState.phase = editPhaseError
+				m.editState.err = "build manifest: " + err.Error()
+				return nil
+			}
+			return edit.ApplyCmd(m.ctx, m.editRunner, manifest)
+		case "n", "N", "esc":
+			m.editState = editState{phase: editPhaseDone}
+			return nil
+		}
+		return nil
+	case editPhaseError:
+		switch msg.String() {
+		case "r":
+			m.editState.phase = editPhaseEditing
+			return openEditorCmd(m.editState.tempPath)
+		case "esc":
+			m.editState = editState{phase: editPhaseDone}
+			return nil
+		}
+		return nil
+	}
+	// Other phases: only Esc cancels (best-effort).
+	if msg.String() == "esc" {
+		m.editState = editState{phase: editPhaseDone}
+		return nil
+	}
+	return nil
 }
