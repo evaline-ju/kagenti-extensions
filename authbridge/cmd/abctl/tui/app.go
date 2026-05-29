@@ -548,7 +548,17 @@ sortAndRebuild:
 func (m *model) View() string {
 	if m.pane == paneNamespaces {
 		title := "abctl · pick namespace"
-		body := m.namespacesTbl.View()
+		// m.namespaces == nil → still loading (don't flash the empty-state
+		// hint mid-load); non-nil empty slice → loaded, no agents found.
+		var body string
+		switch {
+		case m.namespaces != nil && len(m.namespaces) == 0 && m.pickerErr == "":
+			body = styleHint.Render(
+				"No AuthBridge agents found in this cluster.\n" +
+					"Use `abctl --endpoint http://...` to connect to a session API directly.")
+		default:
+			body = m.namespacesTbl.View()
+		}
 		footer := "[↑↓/jk] nav  [↵] open  [q] quit"
 		if m.pickerErr != "" {
 			footer = "error: " + m.pickerErr + "    " + footer

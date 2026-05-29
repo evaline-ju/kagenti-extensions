@@ -53,6 +53,22 @@ func TestNamespacesPaneLoadsAndRenders(t *testing.T) {
 	}
 }
 
+func TestNamespacesPaneEmptyState(t *testing.T) {
+	// Lister returns no agents — the pane should render an actionable hint
+	// instead of an empty table.
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: []cluster.AgentNamespace{}}, nil)
+	loaded := m.Init()()
+	updated, _ := m.Update(loaded)
+	mm := updated.(*model)
+	view := mm.View()
+	if !strings.Contains(view, "No AuthBridge agents found") {
+		t.Fatalf("empty-state hint missing from view:\n%s", view)
+	}
+	if !strings.Contains(view, "--endpoint") {
+		t.Fatalf("empty-state hint should mention --endpoint:\n%s", view)
+	}
+}
+
 func TestNamespacesPaneDrillsIntoPods(t *testing.T) {
 	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
 	loaded := m.Init()()
