@@ -40,6 +40,13 @@ type editState struct {
 	diff      string // colorized output from edit.Diff
 	err       string // single-line message in editPhaseError
 	applyTime time.Time
+	// validationErrs are dependency/claim issues abctl detected before
+	// apply by checking the proposed pipeline against the plugin
+	// catalog. Empty when validation passed or the catalog isn't loaded.
+	// Rendered above the diff in the editPhaseDiff overlay so operators
+	// see them before deciding to apply. Non-blocking — the framework's
+	// own validateRelationships is still the source of truth at reload.
+	validationErrs []edit.ValidationError
 	// generation is bumped each time a fresh edit cycle begins (initial
 	// `e`, retry from error, restart after abort). Each tea.Cmd captures
 	// the value at issue time; handlers drop messages whose captured
@@ -77,9 +84,27 @@ func renderEditOverlay(s editState, width, height int) string {
 	case editPhaseDiff:
 		b.WriteString(styleTitle.Render("Edit pipeline — review diff"))
 		b.WriteString("\n\n")
+		// Validation banner: render BEFORE the diff so operators see
+		// dependency issues at first glance. Non-blocking — apply still
+		// works.
+		if len(s.validationErrs) > 0 {
+			b.WriteString(styleError.Render(fmt.Sprintf(
+				"⚠ %d validation issue%s — framework reload will reject:",
+				len(s.validationErrs), plural(len(s.validationErrs)))))
+			b.WriteString("\n")
+			for _, ve := range s.validationErrs {
+				b.WriteString(fmt.Sprintf("  • [%s] %s pos %d: %s\n",
+					ve.Direction, ve.PluginName, ve.Position, ve.Message))
+			}
+			b.WriteString("\n")
+		}
 		b.WriteString(s.diff)
 		b.WriteString("\n")
-		b.WriteString(styleHint.Render("apply this change? (y/N)"))
+		if len(s.validationErrs) > 0 {
+			b.WriteString(styleHint.Render("apply anyway? (y/N)"))
+		} else {
+			b.WriteString(styleHint.Render("apply this change? (y/N)"))
+		}
 	case editPhaseApplying:
 		b.WriteString(styleTitle.Render("Edit pipeline"))
 		b.WriteString("\n\n")

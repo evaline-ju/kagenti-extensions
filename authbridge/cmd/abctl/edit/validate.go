@@ -1,0 +1,195 @@
+package edit
+
+import (
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
+)
+
+// ValidationError describes one problem with a proposed pipeline,
+// detected by abctl before kubectl apply. The framework's own
+// validateRelationships is the source of truth (and runs again after
+// reload); this is the fast-feedback layer.
+type ValidationError struct {
+	// Direction is "inbound" or "outbound".
+	Direction string
+	// PluginName is the offending plugin's name.
+	PluginName string
+	// Position is the offending plugin's 1-based position in its chain.
+	Position int
+	// Message is operator-facing: "Requires mcp-parser, missing in
+	// outbound chain" / "Unknown plugin name" / etc.
+	Message string
+}
+
+// pipelineDoc mirrors the runtime YAML's pipeline subtree. Only the
+// fields the validator needs.
+type pipelineDoc struct {
+	Inbound  pipelineChain `yaml:"inbound"`
+	Outbound pipelineChain `yaml:"outbound"`
+}
+
+type pipelineChain struct {
+	Plugins []pluginEntry `yaml:"plugins"`
+}
+
+type pluginEntry struct {
+	Name string `yaml:"name"`
+}
+
+// pipelineRoot wraps pipelineDoc under the top-level "pipeline:" key,
+// which is what callers pass in (the inner subtree).
+type pipelineRoot struct {
+	Pipeline pipelineDoc `yaml:"pipeline"`
+}
+
+// ValidatePipeline parses subtree YAML and checks Requires /
+// RequiresAny / After / Claims against the catalog. Catalog comes
+// from /v1/plugins; passing nil disables validation (no errors
+// returned). Unknown plugin names produce errors so a typo gets
+// caught before apply.
+//
+// The Claims check enforces cross-plugin uniqueness within a single
+// chain — same as plugins.validateRelationships.
+//
+// Returns nil when all checks pass.
+func ValidatePipeline(subtree []byte, catalog []apiclient.PluginCatalogEntry) []ValidationError {
+	if catalog == nil {
+		return nil
+	}
+	var root pipelineRoot
+	if err := yaml.Unmarshal(subtree, &root); err != nil {
+		// YAML errors are surfaced separately by the caller; this
+		// validator's job is the dependency layer only.
+		return nil
+	}
+	byName := make(map[string]apiclient.PluginCatalogEntry, len(catalog))
+	for _, e := range catalog {
+		byName[e.Name] = e
+	}
+
+	var errs []ValidationError
+	errs = append(errs, validateChain("inbound", root.Pipeline.Inbound, byName)...)
+	errs = append(errs, validateChain("outbound", root.Pipeline.Outbound, byName)...)
+	return errs
+}
+
+// validateChain runs the Requires/RequiresAny/After/Claims/unknown-name
+// checks for one direction.
+func validateChain(direction string, chain pipelineChain, byName map[string]apiclient.PluginCatalogEntry) []ValidationError {
+	var errs []ValidationError
+	// Track positions of each name for ordering checks. Using lowest
+	// position wins on duplicates — same as the framework.
+	positions := map[string]int{}
+	for i, p := range chain.Plugins {
+		if _, seen := positions[p.Name]; !seen {
+			positions[p.Name] = i + 1
+		}
+	}
+	// Track claims; first-declarer wins for the diagnostic.
+	claimedBy := map[string]string{}
+
+	for i, p := range chain.Plugins {
+		pos := i + 1
+		entry, known := byName[p.Name]
+		if !known {
+			errs = append(errs, ValidationError{
+				Direction:  direction,
+				PluginName: p.Name,
+				Position:   pos,
+				Message: fmt.Sprintf("Unknown plugin %q (not in /v1/plugins catalog)",
+					p.Name),
+			})
+			continue
+		}
+
+		// Requires: every name MUST appear at strictly-lower position.
+		for _, req := range entry.Requires {
+			rp, present := positions[req]
+			if !present {
+				errs = append(errs, ValidationError{
+					Direction:  direction,
+					PluginName: p.Name,
+					Position:   pos,
+					Message: fmt.Sprintf("Requires %q, but it is not in the %s chain",
+						req, direction),
+				})
+				continue
+			}
+			if rp >= pos {
+				errs = append(errs, ValidationError{
+					Direction:  direction,
+					PluginName: p.Name,
+					Position:   pos,
+					Message: fmt.Sprintf("Requires %q upstream, but it is at position %d (must be < %d)",
+						req, rp, pos),
+				})
+			}
+		}
+
+		// RequiresAny: at least one of the listed names must appear at
+		// lower position. Each named one that IS present must be earlier.
+		if len(entry.RequiresAny) > 0 {
+			anyOK := false
+			for _, opt := range entry.RequiresAny {
+				rp, present := positions[opt]
+				if !present {
+					continue
+				}
+				if rp < pos {
+					anyOK = true
+				}
+				if rp >= pos {
+					errs = append(errs, ValidationError{
+						Direction:  direction,
+						PluginName: p.Name,
+						Position:   pos,
+						Message: fmt.Sprintf("RequiresAny lists %q which is at position %d (must be < %d)",
+							opt, rp, pos),
+					})
+				}
+			}
+			if !anyOK {
+				errs = append(errs, ValidationError{
+					Direction:  direction,
+					PluginName: p.Name,
+					Position:   pos,
+					Message: fmt.Sprintf("RequiresAny %v: none present upstream in %s chain",
+						entry.RequiresAny, direction),
+				})
+			}
+		}
+
+		// After: present-at-higher-position is a misorder.
+		for _, name := range entry.After {
+			rp, present := positions[name]
+			if present && rp > pos {
+				errs = append(errs, ValidationError{
+					Direction:  direction,
+					PluginName: p.Name,
+					Position:   pos,
+					Message: fmt.Sprintf("After %q expects it earlier; it's at position %d (> %d)",
+						name, rp, pos),
+				})
+			}
+		}
+
+		// Claims: at most one declarer per claim string per chain.
+		for _, claim := range entry.Claims {
+			if other, taken := claimedBy[claim]; taken && other != p.Name {
+				errs = append(errs, ValidationError{
+					Direction:  direction,
+					PluginName: p.Name,
+					Position:   pos,
+					Message: fmt.Sprintf("Claim %q already declared by %q in this chain",
+						claim, other),
+				})
+			} else {
+				claimedBy[claim] = p.Name
+			}
+		}
+	}
+	return errs
+}

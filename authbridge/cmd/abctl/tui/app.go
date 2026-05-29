@@ -663,6 +663,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editState.err = "invalid YAML: " + err.Error()
 			return m, nil
 		}
+		// Pre-apply validation against the catalog. Skipped silently
+		// when the catalog hasn't been fetched yet (operator hasn't
+		// pressed P); the framework's validateRelationships is the
+		// source of truth and runs again on reload regardless.
+		var catalog []apiclient.PluginCatalogEntry
+		if m.catalog != nil {
+			catalog = m.catalog.Plugins
+		}
+		m.editState.validationErrs = edit.ValidatePipeline(edited, catalog)
 		m.editState.diff = edit.Diff(originalSubtree, edited)
 		m.editState.phase = editPhaseDiff
 		return m, nil
