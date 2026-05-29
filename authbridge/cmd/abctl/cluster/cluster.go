@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
 )
 
 // sidecarContainerNames is the set of container names that mark a pod as
@@ -27,8 +26,7 @@ type Pod struct {
 	Namespace string
 	Name      string
 	Phase     string
-	Ready     bool      // true when every container in containerStatuses is ready
-	StartedAt time.Time // status.startTime; zero if absent
+	Ready     bool // true when every container in containerStatuses is ready
 }
 
 // AgentNamespace is a namespace plus the AuthBridge-bearing pods inside it.
@@ -51,8 +49,7 @@ type kubectlPodList struct {
 			} `json:"containers"`
 		} `json:"spec"`
 		Status struct {
-			Phase             string    `json:"phase"`
-			StartTime         time.Time `json:"startTime"`
+			Phase             string `json:"phase"`
 			ContainerStatuses []struct {
 				Ready bool `json:"ready"`
 			} `json:"containerStatuses"`
@@ -91,7 +88,6 @@ func parseAgentPods(raw []byte) ([]AgentNamespace, error) {
 			Name:      item.Metadata.Name,
 			Phase:     item.Status.Phase,
 			Ready:     ready,
-			StartedAt: item.Status.StartTime,
 		})
 	}
 	out := make([]AgentNamespace, 0, len(byNs))
