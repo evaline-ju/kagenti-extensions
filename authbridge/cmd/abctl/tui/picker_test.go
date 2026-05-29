@@ -13,10 +13,14 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
 )
 
-// fakeLister returns a fixed []AgentNamespace.
-type fakeLister struct{ namespaces []cluster.AgentNamespace }
+// fakeLister returns a fixed []AgentNamespace and counts ListAgents calls.
+type fakeLister struct {
+	namespaces []cluster.AgentNamespace
+	calls      int
+}
 
 func (f *fakeLister) ListAgents(ctx context.Context) ([]cluster.AgentNamespace, error) {
+	f.calls++
 	return f.namespaces, nil
 }
 
@@ -50,6 +54,22 @@ func TestNamespacesPaneLoadsAndRenders(t *testing.T) {
 	view := mm.View()
 	if !strings.Contains(view, "team1") || !strings.Contains(view, "team2") {
 		t.Fatalf("rendered view missing namespaces:\n%s", view)
+	}
+}
+
+func TestNamespacesPaneEmptyState(t *testing.T) {
+	// Lister returns no agents — the pane should render an actionable hint
+	// instead of an empty table.
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: []cluster.AgentNamespace{}}, nil)
+	loaded := m.Init()()
+	updated, _ := m.Update(loaded)
+	mm := updated.(*model)
+	view := mm.View()
+	if !strings.Contains(view, "No AuthBridge agents found") {
+		t.Fatalf("empty-state hint missing from view:\n%s", view)
+	}
+	if !strings.Contains(view, "--endpoint") {
+		t.Fatalf("empty-state hint should mention --endpoint:\n%s", view)
 	}
 }
 
@@ -95,6 +115,127 @@ func TestPodsPaneEscBacksOut(t *testing.T) {
 	mm = updated.(*model)
 	if mm.pane != paneNamespaces {
 		t.Fatalf("Esc should back out to Namespaces, got pane %v", mm.pane)
+	}
+}
+
+func TestRefreshKeybindReloadsAgents(t *testing.T) {
+	lister := &fakeLister{namespaces: fixtureNamespaces}
+	m := newPickerModel(context.Background(), lister, nil)
+	// Initial load: 1 call.
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	if lister.calls != 1 {
+		t.Fatalf("after Init: lister.calls = %d, want 1", lister.calls)
+	}
+	mm.pickerErr = "stale error from earlier"
+
+	// `r` from paneNamespaces should re-run loadAgentsCmd and clear the error.
+	_, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd == nil {
+		t.Fatal("`r` on paneNamespaces should produce a Cmd to reload")
+	}
+	if mm.pickerErr != "" {
+		t.Fatalf("`r` should clear pickerErr, got %q", mm.pickerErr)
+	}
+	// Run the Cmd and feed its message through Update so the post-reload
+	// transition (clear m.loading, rebuild table) actually runs.
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+	if lister.calls != 2 {
+		t.Fatalf("after r on paneNamespaces: lister.calls = %d, want 2", lister.calls)
+	}
+	if mm.loading {
+		t.Fatal("agentsLoadedMsg should clear m.loading")
+	}
+
+	// Drill into team1, press `r` from panePods. Same effect.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	if mm.pane != panePods {
+		t.Fatalf("setup: not on panePods, got %v", mm.pane)
+	}
+	_, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd == nil {
+		t.Fatal("`r` on panePods should produce a Cmd to reload")
+	}
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+	if lister.calls != 3 {
+		t.Fatalf("after r on panePods: lister.calls = %d, want 3", lister.calls)
+	}
+	// Pane stays on panePods (selectedNamespace still exists in the new data).
+	if mm.pane != panePods {
+		t.Fatalf("after r on panePods with stable data: pane = %v, want panePods", mm.pane)
+	}
+}
+
+func TestRefreshKeybindIgnoredWhileLoading(t *testing.T) {
+	lister := &fakeLister{namespaces: fixtureNamespaces}
+	m := newPickerModel(context.Background(), lister, nil)
+	// Init dispatches loadAgentsCmd and sets m.loading = true. We don't
+	// execute the Cmd yet — that simulates the load being in flight.
+	initCmd := m.Init()
+	if initCmd == nil {
+		t.Fatal("Init should return a Cmd")
+	}
+	if !m.loading {
+		t.Fatal("Init should set m.loading = true")
+	}
+	// `r` while loading: the gate is purely on m.loading, regardless of
+	// whether the in-flight Cmd has run yet. No new dispatch.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd != nil {
+		t.Fatal("`r` while loading should return nil Cmd")
+	}
+	// Complete the original load; loading flag clears.
+	_, _ = m.Update(initCmd())
+	if m.loading {
+		t.Fatal("agentsLoadedMsg should clear m.loading")
+	}
+	if lister.calls != 1 {
+		t.Fatalf("only the original load should have run: lister.calls = %d, want 1", lister.calls)
+	}
+	// Now `r` works again.
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd == nil {
+		t.Fatal("`r` after load completes should produce a Cmd")
+	}
+	_ = cmd()
+	if lister.calls != 2 {
+		t.Fatalf("after second r: lister.calls = %d, want 2", lister.calls)
+	}
+}
+
+func TestRefreshDropsBackOutWhenSelectedNamespaceVanishes(t *testing.T) {
+	// Drill into team1, then the lister's underlying data shifts to
+	// only-team2. After `r`, the user should land back on paneNamespaces
+	// since team1 no longer exists.
+	lister := &fakeLister{namespaces: fixtureNamespaces}
+	m := newPickerModel(context.Background(), lister, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter}) // → panePods on team1
+	mm = updated.(*model)
+	if mm.pane != panePods {
+		t.Fatalf("setup: not on panePods, got %v", mm.pane)
+	}
+
+	// Cluster state changes — only team2 remains.
+	lister.namespaces = []cluster.AgentNamespace{
+		{Name: "team2", Pods: []cluster.Pod{
+			{Namespace: "team2", Name: "billing-agent-1", Phase: "Pending", Ready: false},
+		}},
+	}
+	// Press `r`, deliver the new agentsLoadedMsg.
+	_, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+
+	if mm.pane != paneNamespaces {
+		t.Fatalf("after vanished-namespace reload, pane should be paneNamespaces, got %v", mm.pane)
+	}
+	if mm.selectedNamespace != "" {
+		t.Fatalf("selectedNamespace should be cleared, got %q", mm.selectedNamespace)
 	}
 }
 

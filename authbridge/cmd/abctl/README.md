@@ -80,6 +80,7 @@ The UI has three panes. `Enter` drills in; `Esc` backs out.
 | `Enter` | namespaces | open the namespace |
 | `Enter` | pods | port-forward + connect |
 | `Esc` | pods | back to namespaces |
+| `r` | namespaces, pods | reload agent list from cluster |
 | `Enter` / `→` / `l` | sessions, events | drill into selection |
 | `Esc` / `←` / `h` | detail, events | back out |
 | `Esc` | sessions, pipeline | (picker mode) tear down port-forward and back to pods |
@@ -109,7 +110,6 @@ results; treat the output accordingly.
 ## Deferred to later PRs
 
 - Native clipboard (currently writes to `/tmp`).
-- In-process `kubectl port-forward` (currently manual).
 - Fuzzy search beyond substring match.
 - Per-user filtering (`Identity.Subject == X`).
 - Krew plugin packaging.
