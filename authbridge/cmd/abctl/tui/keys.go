@@ -220,8 +220,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if m.editState.phase != editPhaseDone {
 			return nil // already editing
 		}
-		m.editState = editState{phase: editPhaseFetching}
-		return edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod)
+		gen := m.editState.generation + 1
+		m.editState = editState{phase: editPhaseFetching, generation: gen}
+		return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod))
 
 	case "g":
 		m.goTop()
@@ -410,7 +411,7 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 				m.editState.err = "build manifest: " + err.Error()
 				return nil
 			}
-			return edit.ApplyCmd(m.ctx, m.editRunner, manifest)
+			return withGen(m.editState.generation, edit.ApplyCmd(m.ctx, m.editRunner, manifest))
 		case "n", "N", "esc":
 			m.editState = editState{phase: editPhaseDone}
 			return nil
@@ -421,13 +422,16 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 		case "r":
 			// If the fetch never completed (tempPath empty), retry the
 			// fetch instead of opening $EDITOR on "" (which leaves the
-			// user with nothing to edit and a misleading flow).
+			// user with nothing to edit and a misleading flow). A retry
+			// bumps gen so any straggling messages from the failed
+			// attempt are dropped.
 			if m.editState.tempPath == "" {
-				m.editState = editState{phase: editPhaseFetching}
-				return edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod)
+				gen := m.editState.generation + 1
+				m.editState = editState{phase: editPhaseFetching, generation: gen}
+				return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod))
 			}
 			m.editState.phase = editPhaseEditing
-			return openEditorCmd(m.editState.tempPath)
+			return openEditorCmd(m.editState.generation, m.editState.tempPath)
 		case "esc":
 			m.editState = editState{phase: editPhaseDone}
 			return nil

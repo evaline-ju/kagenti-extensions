@@ -91,7 +91,7 @@ func TestEditFlow_HappyPath(t *testing.T) {
 	}
 
 	// Run FetchCmd.
-	fetchedMsg := cmd().(edit.FetchedMsg)
+	fetchedMsg := cmd().(genFetchedMsg)
 	if fetchedMsg.Err != nil {
 		t.Fatalf("Fetch failed: %v", fetchedMsg.Err)
 	}
@@ -110,7 +110,7 @@ func TestEditFlow_HappyPath(t *testing.T) {
 	}
 
 	// Inject editorExitedMsg directly (skips the real ExecProcess).
-	updated, _ = mm.Update(editorExitedMsg{err: nil})
+	updated, _ = mm.Update(editorExitedMsg{gen: mm.editState.generation, err: nil})
 	mm = updated.(*model)
 	if mm.editState.phase != editPhaseDiff {
 		t.Fatalf("phase = %v, want editPhaseDiff (validate should pass)", mm.editState.phase)
@@ -130,7 +130,7 @@ func TestEditFlow_HappyPath(t *testing.T) {
 	}
 
 	// Run ApplyCmd.
-	appliedMsg := cmd().(edit.AppliedMsg)
+	appliedMsg := cmd().(genAppliedMsg)
 	if appliedMsg.Err != nil {
 		t.Fatalf("apply failed: %v", appliedMsg.Err)
 	}
@@ -145,7 +145,7 @@ func TestEditFlow_HappyPath(t *testing.T) {
 	}
 
 	// Run PollCmd.
-	polledMsg := cmd().(edit.PolledMsg)
+	polledMsg := cmd().(genPolledMsg)
 	if polledMsg.Result.Status != edit.PollSuccess {
 		t.Fatalf("poll status = %v, want PollSuccess", polledMsg.Result.Status)
 	}
@@ -175,7 +175,7 @@ func TestEditFlow_NCancelsAtDiff(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	mm := updated.(*model)
-	fetchedMsg := cmd().(edit.FetchedMsg)
+	fetchedMsg := cmd().(genFetchedMsg)
 	defer os.Remove(fetchedMsg.TempPath)
 
 	// Pretend the user edited.
@@ -184,7 +184,7 @@ func TestEditFlow_NCancelsAtDiff(t *testing.T) {
 
 	updated, _ = mm.Update(fetchedMsg)
 	mm = updated.(*model)
-	updated, _ = mm.Update(editorExitedMsg{err: nil})
+	updated, _ = mm.Update(editorExitedMsg{gen: mm.editState.generation, err: nil})
 	mm = updated.(*model)
 	if mm.editState.phase != editPhaseDiff {
 		t.Fatalf("setup: phase = %v, want editPhaseDiff", mm.editState.phase)
@@ -218,7 +218,7 @@ func TestEditFlow_NormalizesTrailingNewline(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	mm := updated.(*model)
-	fetchedMsg := cmd().(edit.FetchedMsg)
+	fetchedMsg := cmd().(genFetchedMsg)
 	defer os.Remove(fetchedMsg.TempPath)
 
 	// Write an edit deliberately missing a trailing newline.
@@ -232,7 +232,7 @@ func TestEditFlow_NormalizesTrailingNewline(t *testing.T) {
 
 	updated, _ = mm.Update(fetchedMsg)
 	mm = updated.(*model)
-	updated, _ = mm.Update(editorExitedMsg{err: nil})
+	updated, _ = mm.Update(editorExitedMsg{gen: mm.editState.generation, err: nil})
 	mm = updated.(*model)
 	if mm.editState.phase != editPhaseDiff {
 		t.Fatalf("phase = %v, want editPhaseDiff", mm.editState.phase)
@@ -258,7 +258,7 @@ func TestEditFlow_RollbackOnReloadFailure(t *testing.T) {
 	// Drive through fetch → editor → diff → apply.
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	mm := updated.(*model)
-	fetchedMsg := cmd().(edit.FetchedMsg)
+	fetchedMsg := cmd().(genFetchedMsg)
 	if fetchedMsg.Err != nil {
 		t.Fatalf("Fetch failed: %v", fetchedMsg.Err)
 	}
@@ -271,22 +271,22 @@ func TestEditFlow_RollbackOnReloadFailure(t *testing.T) {
 
 	updated, _ = mm.Update(fetchedMsg)
 	mm = updated.(*model)
-	updated, _ = mm.Update(editorExitedMsg{err: nil})
+	updated, _ = mm.Update(editorExitedMsg{gen: mm.editState.generation, err: nil})
 	mm = updated.(*model)
 	updated, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	mm = updated.(*model)
-	appliedMsg := cmd().(edit.AppliedMsg)
+	appliedMsg := cmd().(genAppliedMsg)
 	if appliedMsg.Err != nil {
 		t.Fatalf("apply failed: %v", appliedMsg.Err)
 	}
 	updated, _ = mm.Update(appliedMsg)
 	mm = updated.(*model)
 
-	// Inject a PollFailure manually.
-	failure := edit.PolledMsg{Result: edit.PollResult{
-		Status:    edit.PollFailure,
-		LastError: "unknown plugin: bogus",
-	}}
+	// Inject a PollFailure manually with the current generation.
+	failure := genPolledMsg{
+		gen:       mm.editState.generation,
+		PolledMsg: edit.PolledMsg{Result: edit.PollResult{Status: edit.PollFailure, LastError: "unknown plugin: bogus"}},
+	}
 	updated, cmd = mm.Update(failure)
 	mm = updated.(*model)
 	if mm.editState.phase != editPhaseRollback {
@@ -296,7 +296,7 @@ func TestEditFlow_RollbackOnReloadFailure(t *testing.T) {
 		t.Fatal("expected RollbackCmd")
 	}
 
-	rolledBack := cmd().(edit.RolledBackMsg)
+	rolledBack := cmd().(genRolledBackMsg)
 	if rolledBack.Err != nil {
 		t.Fatalf("rollback Apply error: %v", rolledBack.Err)
 	}
@@ -332,7 +332,12 @@ func TestEditFlow_LatePolledMsgAfterAbort(t *testing.T) {
 			t.Fatalf("late PolledMsg should be dropped, but panicked: %v", r)
 		}
 	}()
-	late := edit.PolledMsg{Result: edit.PollResult{Status: edit.PollFailure, LastError: "anything"}}
+	// Late message with a stale gen should also be dropped — the gen
+	// guard is the more robust discriminator.
+	late := genPolledMsg{
+		gen:       42,
+		PolledMsg: edit.PolledMsg{Result: edit.PollResult{Status: edit.PollFailure, LastError: "anything"}},
+	}
 	updated, _ := m.Update(late)
 	mm := updated.(*model)
 	if mm.editState.phase != editPhaseDone {
@@ -355,17 +360,17 @@ func TestEditFlow_BackgroundedSuccess(t *testing.T) {
 	// Drive through fetch → editor → diff → apply → waiting.
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	mm := updated.(*model)
-	fetchedMsg := cmd().(edit.FetchedMsg)
+	fetchedMsg := cmd().(genFetchedMsg)
 	defer os.Remove(fetchedMsg.TempPath)
 	_ = os.WriteFile(fetchedMsg.TempPath,
 		[]byte("pipeline:\n  inbound:\n    - name: jwt-validation\n      config:\n        x: 1\n"), 0o600)
 	updated, _ = mm.Update(fetchedMsg)
 	mm = updated.(*model)
-	updated, _ = mm.Update(editorExitedMsg{err: nil})
+	updated, _ = mm.Update(editorExitedMsg{gen: mm.editState.generation, err: nil})
 	mm = updated.(*model)
 	updated, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	mm = updated.(*model)
-	updated, _ = mm.Update(cmd().(edit.AppliedMsg))
+	updated, _ = mm.Update(cmd().(genAppliedMsg))
 	mm = updated.(*model)
 	if mm.editState.phase != editPhaseWaiting {
 		t.Fatalf("setup: phase = %v, want editPhaseWaiting", mm.editState.phase)
@@ -382,7 +387,10 @@ func TestEditFlow_BackgroundedSuccess(t *testing.T) {
 	}
 
 	// Late PollSuccess arrives — should flash and reset to Done.
-	success := edit.PolledMsg{Result: edit.PollResult{Status: edit.PollSuccess}}
+	success := genPolledMsg{
+		gen:       mm.editState.generation,
+		PolledMsg: edit.PolledMsg{Result: edit.PollResult{Status: edit.PollSuccess}},
+	}
 	updated, _ = mm.Update(success)
 	mm = updated.(*model)
 	if mm.editState.phase != editPhaseDone {
@@ -391,4 +399,71 @@ func TestEditFlow_BackgroundedSuccess(t *testing.T) {
 	if !strings.Contains(mm.flash, "succeeded") {
 		t.Fatalf("expected success flash; got %q", mm.flash)
 	}
+}
+
+// TestEditFlow_StaleMsgFromAbandonedEditDropped verifies that a
+// PolledMsg from Edit 1 (whose user Esc'd then started Edit 2 quickly)
+// is dropped and does NOT route Edit 1's reload result onto Edit 2.
+func TestEditFlow_StaleMsgFromAbandonedEditDropped(t *testing.T) {
+	runner := &editFakeRunner{getResponse: []byte(editFixtureCMYAML)}
+	m := newPickerModel(context.Background(), nil, nil)
+	m.editRunner = runner.run
+	m.statusURL = "http://stub"
+	m.selectedNamespace = "team1"
+	m.selectedPod = "email-agent"
+	m.pane = panePipeline
+
+	// Edit 1: drive to Waiting, then abort.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	mm := updated.(*model)
+	fetchedMsg1 := cmd().(genFetchedMsg)
+	defer os.Remove(fetchedMsg1.TempPath)
+	gen1 := mm.editState.generation
+
+	_ = os.WriteFile(fetchedMsg1.TempPath,
+		[]byte("pipeline:\n  inbound:\n    - name: jwt-validation\n      config:\n        x: 1\n"), 0o600)
+	updated, _ = mm.Update(fetchedMsg1)
+	mm = updated.(*model)
+	updated, _ = mm.Update(editorExitedMsg{gen: gen1, err: nil})
+	mm = updated.(*model)
+	updated, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	mm = updated.(*model)
+	updated, _ = mm.Update(cmd().(genAppliedMsg))
+	mm = updated.(*model)
+
+	// User aborts Edit 1.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	// (phase is now editPhaseBackground; Esc on Waiting backgrounds.
+	// Move it fully out so we can start Edit 2.)
+	mm.editState = editState{phase: editPhaseDone, generation: gen1}
+
+	// Edit 2 starts.
+	updated, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	mm = updated.(*model)
+	if mm.editState.generation == gen1 {
+		t.Fatal("Edit 2's generation should differ from Edit 1's")
+	}
+	gen2 := mm.editState.generation
+
+	// Edit 1's stale PollFailure arrives now.
+	stale := genPolledMsg{
+		gen:       gen1,
+		PolledMsg: edit.PolledMsg{Result: edit.PollResult{Status: edit.PollFailure, LastError: "edit 1 reload"}},
+	}
+	updated, returnedCmd := mm.Update(stale)
+	mm = updated.(*model)
+	// Edit 2 must remain in Fetching (its only allowed phase post-`e`),
+	// not jump to Rollback or Error from Edit 1's stale msg.
+	if mm.editState.phase != editPhaseFetching {
+		t.Fatalf("phase = %v, want editPhaseFetching (stale msg should be ignored)", mm.editState.phase)
+	}
+	if mm.editState.generation != gen2 {
+		t.Fatalf("Edit 2's gen mutated: %d vs %d", mm.editState.generation, gen2)
+	}
+	if returnedCmd != nil {
+		t.Fatal("stale PolledMsg should not produce a Cmd")
+	}
+	// Quiet "cmd is unused after Edit 2 dispatch" by referencing it.
+	_ = cmd
 }

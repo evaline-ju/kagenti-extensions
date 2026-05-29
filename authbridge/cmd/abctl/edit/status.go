@@ -43,20 +43,38 @@ const baselineFailedSentinel int64 = -1
 // reloads.
 const pollInterval = 1 * time.Second
 
+// pollMaxBackoff caps the exponential backoff applied to consecutive
+// transport errors. Keeps a flapping endpoint from getting hammered
+// without making the user wait too long once it recovers.
+const pollMaxBackoff = 5 * time.Second
+
+// unreachableThreshold is the number of consecutive transport-layer
+// failures (network errors, non-200) after which the poller gives up
+// rather than waiting for the full deadline. Picked so a normal kubelet
+// hiccup (one or two failed polls) is tolerated, but a port-forward
+// drop or framework crash surfaces fast.
+const unreachableThreshold = 5
+
 // PollUntilReloaded watches statusURL/reload/status until either:
 //   - LastSuccess > applyTime → PollSuccess.
 //   - ReloadsFailed exceeds the value at first successful poll → PollFailure
 //     with LastError populated.
 //   - ctx is done → PollTimeout. (Caller is expected to set a 120s timeout
 //     via context.WithTimeout.)
+//   - 5 consecutive transport errors → PollFailure with a synthesized
+//     "reload status unreachable" LastError, so a port-forward drop or
+//     crashed framework surfaces fast instead of silently sitting through
+//     the whole deadline.
 //
-// HTTP errors (network, non-200) are retried until ctx expires; we treat
-// them as "framework not yet reachable, keep waiting."
+// Backoff: poll at pollInterval, doubled on each transport error up to
+// pollMaxBackoff. Reset to pollInterval on the next successful response.
 func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Time) PollResult {
 	url := statusURL + "/reload/status"
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	baselineFailed := baselineFailedSentinel
+	consecErrors := 0
+	wait := pollInterval
 
 	for {
 		select {
@@ -70,11 +88,14 @@ func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Tim
 			return PollResult{Status: PollTimeout}
 		}
 		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == 200 {
+		ok := err == nil && resp.StatusCode == 200
+		if ok {
 			var rs ReloadStatus
 			decodeErr := json.NewDecoder(resp.Body).Decode(&rs)
 			resp.Body.Close()
 			if decodeErr == nil {
+				consecErrors = 0
+				wait = pollInterval
 				if baselineFailed == baselineFailedSentinel {
 					baselineFailed = rs.ReloadsFailed
 				}
@@ -85,14 +106,29 @@ func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Tim
 					return PollResult{Status: PollFailure, LastError: rs.LastError}
 				}
 			}
-		} else if resp != nil {
-			resp.Body.Close()
+		} else {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			consecErrors++
+			if consecErrors >= unreachableThreshold {
+				return PollResult{
+					Status:    PollFailure,
+					LastError: "reload status endpoint unreachable (port-forward dropped or framework down?)",
+				}
+			}
+			if wait < pollMaxBackoff {
+				wait *= 2
+				if wait > pollMaxBackoff {
+					wait = pollMaxBackoff
+				}
+			}
 		}
 
 		select {
 		case <-ctx.Done():
 			return PollResult{Status: PollTimeout}
-		case <-time.After(pollInterval):
+		case <-time.After(wait):
 		}
 	}
 }

@@ -20,6 +20,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// configMapDataKey is the key inside the ConfigMap's data: mapping that
+// holds the runtime YAML. The kagenti-operator and the editor both
+// agree on this name; if a future operator change renames it, all four
+// callers (Fetch, BuildManifest, the two extractInnerYAML branches)
+// flip together by changing this constant.
+const configMapDataKey = "config.yaml"
+
 // FindPipelineRange returns the byte offsets [start, end) in innerYAML
 // that span the "pipeline:" subtree, including the "pipeline:" key line
 // itself but not any following top-level keys. Used by the editor to
@@ -134,13 +141,13 @@ func BuildManifest(origCMYAML, newInner []byte) ([]byte, error) {
 	}
 	var configValueNode *yaml.Node
 	for i := 0; i < len(dataNode.Content); i += 2 {
-		if dataNode.Content[i].Value == "config.yaml" {
+		if dataNode.Content[i].Value == configMapDataKey {
 			configValueNode = dataNode.Content[i+1]
 			break
 		}
 	}
 	if configValueNode == nil {
-		return nil, fmt.Errorf("ConfigMap data has no config.yaml key")
+		return nil, fmt.Errorf("ConfigMap data has no %q key", configMapDataKey)
 	}
 
 	// Set the value to a literal-block scalar carrying newInner.
@@ -273,13 +280,13 @@ func extractInnerYAML(cmYAML []byte) ([]byte, error) {
 		if doc.Content[i].Value == "data" {
 			dataNode := doc.Content[i+1]
 			for j := 0; j+1 < len(dataNode.Content); j += 2 {
-				if dataNode.Content[j].Value == "config.yaml" {
+				if dataNode.Content[j].Value == configMapDataKey {
 					return []byte(dataNode.Content[j+1].Value), nil
 				}
 			}
 		}
 	}
-	return nil, fmt.Errorf("ConfigMap data has no config.yaml key")
+	return nil, fmt.Errorf("ConfigMap data has no %q key", configMapDataKey)
 }
 
 // Apply writes manifest to a tempfile and runs kubectl apply --server-side

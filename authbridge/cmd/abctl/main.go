@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/tui"
 )
 
@@ -23,6 +24,12 @@ func main() {
 	endpoint := flag.String("endpoint", "",
 		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl opens a Namespaces → Pods picker.")
 	flag.Parse()
+
+	// Best-effort sweep of edit-tempfiles older than 24h. Tempfiles are
+	// intentionally left in place on every exit path (success / abort /
+	// crash) so a user can recover an in-progress edit; the sweep keeps
+	// $TMPDIR bounded for users who edit often.
+	_ = edit.SweepStaleTempfiles()
 
 	// Friendly check: if picker mode and no kubectl, fail fast with a
 	// clear message instead of a stack trace later.

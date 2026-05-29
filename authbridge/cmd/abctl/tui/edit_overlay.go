@@ -40,6 +40,14 @@ type editState struct {
 	diff      string // colorized output from edit.Diff
 	err       string // single-line message in editPhaseError
 	applyTime time.Time
+	// generation is bumped each time a fresh edit cycle begins (initial
+	// `e`, retry from error, restart after abort). Each tea.Cmd captures
+	// the value at issue time; handlers drop messages whose captured
+	// generation doesn't match the current one. Without this, a late
+	// PolledMsg from Edit 1 arriving after the user has Esc'd and
+	// started Edit 2 would route Edit 1's reload result onto Edit 2's
+	// overlay (same phase, different transaction).
+	generation int
 }
 
 // renderEditOverlay returns the overlay content (rendered into a

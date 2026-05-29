@@ -3,10 +3,42 @@ package edit
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// tempFileMaxAge is how long a stale edit tempfile is allowed to sit
+// in $TMPDIR before SweepStaleTempfiles deletes it. 24h covers crash
+// recovery (a user can re-open last day's edit) without letting the
+// directory grow without bound.
+const tempFileMaxAge = 24 * time.Hour
+
+// SweepStaleTempfiles deletes abctl-pipeline-*.yaml tempfiles older
+// than tempFileMaxAge from os.TempDir(). Errors are non-fatal — a
+// best-effort cleanup at startup; the editor still works without it.
+// Returns the number of files removed (for diagnostics).
+func SweepStaleTempfiles() int {
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "abctl-pipeline-*.yaml"))
+	if err != nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-tempFileMaxAge)
+	n := 0
+	for _, p := range matches {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if fi.ModTime().Before(cutoff) {
+			if err := os.Remove(p); err == nil {
+				n++
+			}
+		}
+	}
+	return n
+}
 
 // FetchedMsg is the result of FetchCmd. On success: Fetched and TempPath
 // are both set, Err is nil. On failure: Err is populated, others are zero.
