@@ -595,14 +595,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, edit.PollCmd(m.ctx, m.statusURL, msg.ApplyTime)
 
 	case edit.PolledMsg:
-		// Drop late PolledMsg deliveries after the user aborted the edit
-		// (phase reset to Done) or the state machine moved on. Without
-		// this guard, m.editState.fetched is nil and we'd panic below.
-		if m.editState.phase != editPhaseWaiting || m.editState.fetched == nil {
+		// Drop late PolledMsg deliveries after the user fully aborted
+		// (phase reset to Done) or the state machine moved on. fetched
+		// can be nil in those cases; both Waiting (overlay) and
+		// Background (footer flash) are valid targets.
+		if (m.editState.phase != editPhaseWaiting && m.editState.phase != editPhaseBackground) || m.editState.fetched == nil {
 			return m, nil
 		}
+		bg := m.editState.phase == editPhaseBackground
 		switch msg.Result.Status {
 		case edit.PollSuccess:
+			if bg {
+				m.setFlash("hot-reload succeeded")
+			}
 			m.editState = editState{phase: editPhaseDone}
 			return m, m.loadPipelineCmd()
 		case edit.PollFailure, edit.PollTimeout:
@@ -617,18 +622,40 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editState.fetched.InnerYAML,
 			)
 			if mErr != nil {
+				if bg {
+					m.setFlash("hot-reload failed: " + reason + "; rollback build failed too")
+					m.editState = editState{phase: editPhaseDone}
+					return m, nil
+				}
 				m.editState.phase = editPhaseError
 				m.editState.err = "reload failed: " + reason +
 					"\n(rollback build failed: " + mErr.Error() + ")"
 				return m, nil
 			}
-			m.editState.phase = editPhaseRollback
+			// Stay backgrounded if user already Esc'd.
+			if bg {
+				m.editState.phase = editPhaseBackground
+			} else {
+				m.editState.phase = editPhaseRollback
+			}
 			return m, edit.RollbackCmd(m.ctx, m.editRunner, origManifest, reason)
 		}
 		return m, nil
 
 	case edit.RolledBackMsg:
-		if m.editState.phase != editPhaseRollback {
+		if m.editState.phase != editPhaseRollback && m.editState.phase != editPhaseBackground {
+			return m, nil
+		}
+		bg := m.editState.phase == editPhaseBackground
+		if bg {
+			if msg.Err != nil {
+				m.setFlash("hot-reload failed: " + msg.ReloadErr +
+					"; rollback failed: " + msg.Err.Error())
+			} else {
+				m.setFlash("hot-reload failed: " + msg.ReloadErr +
+					"; rolled back to previous ConfigMap")
+			}
+			m.editState = editState{phase: editPhaseDone}
 			return m, nil
 		}
 		m.editState.phase = editPhaseError
@@ -717,7 +744,9 @@ sortAndRebuild:
 // View composes the full screen.
 func (m *model) View() string {
 	// Edit overlay takes over the screen while an edit is in flight.
-	if m.editState.phase != editPhaseDone {
+	// editPhaseBackground intentionally falls through — the user backed
+	// out and wants the normal UI back; flash messages handle reporting.
+	if m.editState.phase != editPhaseDone && m.editState.phase != editPhaseBackground {
 		return renderEditOverlay(m.editState, m.width, m.height)
 	}
 

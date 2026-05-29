@@ -22,6 +22,12 @@ const (
 	editPhaseApplying
 	editPhaseWaiting
 	editPhaseRollback // re-applying the original ConfigMap after a failed reload
+	// editPhaseBackground means: user pressed Esc during Waiting/Rollback;
+	// the in-flight Cmd is still running and we want to flash its result
+	// in the footer rather than reopen the overlay. Overlay renders nothing
+	// in this phase. fetched/applyTime stay populated so the PolledMsg
+	// handler can still trigger rollback if the in-pod reload failed.
+	editPhaseBackground
 	editPhaseError
 )
 

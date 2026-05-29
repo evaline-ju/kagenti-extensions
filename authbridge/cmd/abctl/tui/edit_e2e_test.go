@@ -327,3 +327,55 @@ func TestEditFlow_LatePolledMsgAfterAbort(t *testing.T) {
 		t.Fatalf("phase changed on late PolledMsg: %v", mm.editState.phase)
 	}
 }
+
+// TestEditFlow_BackgroundedSuccess verifies that pressing Esc during
+// Waiting moves the watch to the background and a later PollSuccess
+// flashes the result instead of just being dropped.
+func TestEditFlow_BackgroundedSuccess(t *testing.T) {
+	runner := &editFakeRunner{getResponse: []byte(editFixtureCMYAML)}
+	m := newPickerModel(context.Background(), nil, nil)
+	m.editRunner = runner.run
+	m.selectedNamespace = "team1"
+	m.selectedPod = "email-agent"
+	m.pane = panePipeline
+
+	// Drive through fetch → editor → diff → apply → waiting.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	mm := updated.(*model)
+	fetchedMsg := cmd().(edit.FetchedMsg)
+	defer os.Remove(fetchedMsg.TempPath)
+	_ = os.WriteFile(fetchedMsg.TempPath,
+		[]byte("pipeline:\n  inbound:\n    - name: jwt-validation\n      config:\n        x: 1\n"), 0o600)
+	updated, _ = mm.Update(fetchedMsg)
+	mm = updated.(*model)
+	updated, _ = mm.Update(editorExitedMsg{err: nil})
+	mm = updated.(*model)
+	updated, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	mm = updated.(*model)
+	updated, _ = mm.Update(cmd().(edit.AppliedMsg))
+	mm = updated.(*model)
+	if mm.editState.phase != editPhaseWaiting {
+		t.Fatalf("setup: phase = %v, want editPhaseWaiting", mm.editState.phase)
+	}
+
+	// Press Esc — should background, not reset.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	if mm.editState.phase != editPhaseBackground {
+		t.Fatalf("Esc-during-waiting: phase = %v, want editPhaseBackground", mm.editState.phase)
+	}
+	if mm.editState.fetched == nil {
+		t.Fatal("fetched should remain populated for late PolledMsg handling")
+	}
+
+	// Late PollSuccess arrives — should flash and reset to Done.
+	success := edit.PolledMsg{Result: edit.PollResult{Status: edit.PollSuccess}}
+	updated, _ = mm.Update(success)
+	mm = updated.(*model)
+	if mm.editState.phase != editPhaseDone {
+		t.Fatalf("after late success: phase = %v, want editPhaseDone", mm.editState.phase)
+	}
+	if !strings.Contains(mm.flash, "succeeded") {
+		t.Fatalf("expected success flash; got %q", mm.flash)
+	}
+}

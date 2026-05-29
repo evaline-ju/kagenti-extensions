@@ -419,9 +419,18 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	}
-	// Other phases: only Esc cancels (best-effort).
+	// Other phases: Esc backgrounds (Waiting / Rollback) so the in-flight
+	// Cmd's eventual result lands as a footer flash, or cancels outright
+	// (Fetching / Editing / Applying — phases where the result is still
+	// safe to drop).
 	if msg.String() == "esc" {
-		m.editState = editState{phase: editPhaseDone}
+		switch m.editState.phase {
+		case editPhaseWaiting, editPhaseRollback:
+			m.editState.phase = editPhaseBackground
+			m.setFlash("hot-reload watch moved to background; you'll be notified")
+		default:
+			m.editState = editState{phase: editPhaseDone}
+		}
 		return nil
 	}
 	return nil
