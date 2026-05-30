@@ -583,6 +583,21 @@ func formatBodyExcerpt(body []byte, n int) string {
 // JSON-RPC notifications (any method starting with `notifications/`)
 // are also bypassed: they're one-way protocol signals, never tied to
 // a specific user turn.
+func isMCPHousekeeping(method string) bool {
+	switch method {
+	case "initialize",
+		"ping",
+		"tools/list",
+		"prompts/list",
+		"resources/list",
+		"resources/templates/list",
+		"completion/complete",
+		"logging/setLevel":
+		return true
+	}
+	return strings.HasPrefix(method, "notifications/")
+}
+
 // isTransportRetrieval reports whether an HTTP method is one of the
 // retrieval-shaped methods that, combined with an empty body, signal
 // "transport-layer call, not a user-meaningful action." See step 5b
@@ -597,21 +612,6 @@ func isTransportRetrieval(method string) bool {
 		return true
 	}
 	return false
-}
-
-func isMCPHousekeeping(method string) bool {
-	switch method {
-	case "initialize",
-		"ping",
-		"tools/list",
-		"prompts/list",
-		"resources/list",
-		"resources/templates/list",
-		"completion/complete",
-		"logging/setLevel":
-		return true
-	}
-	return strings.HasPrefix(method, "notifications/")
 }
 
 // extractMCPToolName pulls the tool name from a tools/call request's
