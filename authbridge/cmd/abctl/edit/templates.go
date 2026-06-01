@@ -64,8 +64,10 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 		b.WriteString("\n")
 	}
 
-	// Split fields into required vs optional to render required first —
-	// required-on-top makes the operator's eye land on the must-fill slots.
+	// Split fields into required vs optional. Required render first so
+	// the operator's eye lands on must-fill slots; the "Required:" header
+	// is always emitted (even when none) so the answer is explicit
+	// rather than inferred from absence.
 	var required, optional []apiclient.PluginFieldEntry
 	for _, f := range p.Fields {
 		if f.Required {
@@ -74,13 +76,17 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 			optional = append(optional, f)
 		}
 	}
-	if len(required) > 0 {
-		names := make([]string, len(required))
-		for i, f := range required {
-			names[i] = f.Name
-		}
+	if len(p.Fields) > 0 {
 		b.WriteString("# Required: ")
-		b.WriteString(strings.Join(names, ", "))
+		if len(required) == 0 {
+			b.WriteString("(none — every field is optional)")
+		} else {
+			names := make([]string, len(required))
+			for i, f := range required {
+				names[i] = f.Name
+			}
+			b.WriteString(strings.Join(names, ", "))
+		}
 		b.WriteString("\n")
 	}
 
@@ -100,29 +106,55 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 	}
 }
 
+// renderField emits two lines per field for readability:
+//
+//	#           # [REQUIRED] <description>
+//	#           <name>: <placeholder>
+//
+// or, for optional fields:
+//
+//	#           # [optional, default=X, enum=a|b] <description>
+//	#           <name>: <placeholder>
+//
+// The bracket prefix scans at the left margin so the operator can tell
+// required from optional without parsing inline notes.
 func renderField(b *strings.Builder, f apiclient.PluginFieldEntry) {
+	// Annotation line.
+	b.WriteString("#           # ")
+	if f.Required {
+		b.WriteString("[REQUIRED]")
+	} else {
+		var attrs []string
+		attrs = append(attrs, "optional")
+		if f.Default != "" {
+			attrs = append(attrs, fmt.Sprintf("default=%s", f.Default))
+		}
+		if len(f.Enum) > 0 {
+			attrs = append(attrs, "enum="+strings.Join(f.Enum, "|"))
+		}
+		b.WriteString("[")
+		b.WriteString(strings.Join(attrs, ", "))
+		b.WriteString("]")
+	}
+	if f.Description != "" {
+		b.WriteString(" ")
+		b.WriteString(f.Description)
+	}
+	b.WriteString("\n")
+
+	// Required field with an enum: still surface the choices, since
+	// they're constraint information, not a default note.
+	if f.Required && len(f.Enum) > 0 {
+		b.WriteString("#           #   choices: ")
+		b.WriteString(strings.Join(f.Enum, " | "))
+		b.WriteString("\n")
+	}
+
+	// Value line.
 	b.WriteString("#           ")
 	b.WriteString(f.Name)
 	b.WriteString(": ")
 	b.WriteString(placeholderFor(f))
-
-	var notes []string
-	if f.Required {
-		notes = append(notes, "required")
-	}
-	if f.Default != "" {
-		notes = append(notes, fmt.Sprintf("default=%s", f.Default))
-	}
-	if len(f.Enum) > 0 {
-		notes = append(notes, "enum="+strings.Join(f.Enum, "|"))
-	}
-	if f.Description != "" {
-		notes = append(notes, f.Description)
-	}
-	if len(notes) > 0 {
-		b.WriteString("  # ")
-		b.WriteString(strings.Join(notes, "; "))
-	}
 	b.WriteString("\n")
 }
 

@@ -53,9 +53,11 @@ func TestRenderTemplates_PluginWithFields(t *testing.T) {
 		"# Required: judge_endpoint, judge_model",
 		"#       - name: ibac",
 		"#         config:",
-		`#           judge_endpoint: ""  # required; Base URL of the LLM judge.`,
-		"#           timeout_ms: 5000  # default=5000; Per-call timeout.",
-		"enum=passthrough|judge",
+		"# [REQUIRED] Base URL of the LLM judge.",
+		`#           judge_endpoint: ""`,
+		"# [optional, default=5000] Per-call timeout.",
+		"#           timeout_ms: 5000",
+		"[optional, default=passthrough, enum=passthrough|judge]",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n----\n%s", want, out)
@@ -83,6 +85,40 @@ func TestRenderTemplates_PluginNoFields(t *testing.T) {
 	}
 	if strings.Contains(out, "config:") {
 		t.Errorf("plugin without fields shouldn't emit config: line:\n%s", out)
+	}
+}
+
+func TestRenderTemplates_AllOptionalShowsRequiredNoneHeader(t *testing.T) {
+	cat := []apiclient.PluginCatalogEntry{
+		{
+			Name: "all-opt",
+			Fields: []apiclient.PluginFieldEntry{
+				{Name: "x", Type: "string"},
+			},
+		},
+	}
+	out := string(RenderTemplates(cat))
+	if !strings.Contains(out, "# Required: (none — every field is optional)") {
+		t.Fatalf("plugin with no required fields should explicitly say so:\n%s", out)
+	}
+}
+
+func TestRenderTemplates_RequiredEnumShowsChoices(t *testing.T) {
+	cat := []apiclient.PluginCatalogEntry{
+		{
+			Name: "p",
+			Fields: []apiclient.PluginFieldEntry{
+				{Name: "mode", Type: "string", Required: true,
+					Enum: []string{"a", "b", "c"}, Description: "Pick one."},
+			},
+		},
+	}
+	out := string(RenderTemplates(cat))
+	if !strings.Contains(out, "# [REQUIRED] Pick one.") {
+		t.Errorf("required field annotation missing:\n%s", out)
+	}
+	if !strings.Contains(out, "#   choices: a | b | c") {
+		t.Errorf("required+enum field should surface choices line:\n%s", out)
 	}
 }
 
