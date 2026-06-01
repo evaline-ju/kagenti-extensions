@@ -319,6 +319,29 @@ func TestStripTemplates_NotFooledBySimilarLine(t *testing.T) {
 	}
 }
 
+func TestStripTemplates_RequiresExactFenceMatch(t *testing.T) {
+	// A line that starts with the marker but has trailing extra content
+	// must NOT match — otherwise an operator's edits on that line could
+	// be silently truncated.
+	original := "pipeline: {}\n"
+	in := []byte(original + FenceMarker + " trailing comment\nstill active\n")
+	got := StripTemplates(in)
+	if string(got) != string(in) {
+		t.Fatalf("fence with trailing content should not trigger truncation\nwant: %q\ngot:  %q", string(in), string(got))
+	}
+}
+
+func TestStripTemplates_AcceptsCRLFFenceLine(t *testing.T) {
+	// CRLF line endings on the fence line itself must still match —
+	// a trailing CR is the one tolerated suffix.
+	original := "pipeline: {}\n"
+	in := []byte(original + FenceMarker + "\r\nbanner\r\n")
+	got := StripTemplates(in)
+	if string(got) != original {
+		t.Fatalf("CRLF on fence line should still match\nwant: %q\ngot:  %q", original, string(got))
+	}
+}
+
 func TestStripTemplates_IntegratesWithRender(t *testing.T) {
 	// Round-trip: render templates after a real subtree, strip them,
 	// and get the subtree back byte-for-byte. This is the no-changes-

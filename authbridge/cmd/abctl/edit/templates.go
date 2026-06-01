@@ -301,7 +301,16 @@ func StripTemplates(edited []byte) []byte {
 		for start < end && (edited[start] == ' ' || edited[start] == '\t') {
 			start++
 		}
-		if end-start >= len(target) && string(edited[start:start+len(target)]) == target {
+		// Exact line match: tolerate a trailing CR (CRLF endings) but
+		// reject any other extra content. A prefix match would let
+		// "# === ABCTL TEMPLATES BELOW (stripped on save) ===extra"
+		// trigger truncation, silently dropping operator edits made
+		// on a line that happens to begin with the marker.
+		lineEnd := end
+		if lineEnd > start && edited[lineEnd-1] == '\r' {
+			lineEnd--
+		}
+		if lineEnd-start == len(target) && string(edited[start:lineEnd]) == target {
 			// Truncate at i — the start of this line — discarding the
 			// fence and everything after, then trim trailing blank
 			// lines so the renderer can prepend visual padding.
