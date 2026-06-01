@@ -105,10 +105,20 @@ func SchemaOf(configType any) []FieldSchema {
 	if t.Kind() != reflect.Struct {
 		return nil
 	}
-	return schemaOfType(t)
+	return schemaOfType(t, 0)
 }
 
-func schemaOfType(t reflect.Type) []FieldSchema {
+// maxSchemaDepth caps recursion in schemaOfType. Plugin configs in
+// practice nest one or two levels (tokenexchange's identity + routes
+// blocks are the deepest today); the cap is defensive against a
+// future config struct with an inadvertent self-referential field
+// (e.g. a *Self pointer) which would otherwise stack-overflow.
+const maxSchemaDepth = 10
+
+func schemaOfType(t reflect.Type, depth int) []FieldSchema {
+	if depth > maxSchemaDepth {
+		return nil
+	}
 	var out []FieldSchema
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -140,14 +150,11 @@ func schemaOfType(t reflect.Type) []FieldSchema {
 			}
 		}
 		if schema.Type == "object" {
-			// Recurse unboundedly. Plugin configs in practice nest at
-			// most one or two levels (e.g. tokenexchange's identity +
-			// routes blocks); pathological self-referential configs
-			// (a struct containing *Self) would loop, but no such
-			// shape exists today and the framework rejects exotic
-			// configs at decode time anyway. If a depth guard becomes
-			// necessary, this is the spot for it.
-			schema.Fields = schemaOfType(unwrap(f.Type))
+			// Recurse with a depth bound (see maxSchemaDepth). Plugin
+			// configs nest one or two levels in practice; the cap
+			// guards against an inadvertent self-referential field
+			// (e.g. *Self) silently blowing the stack.
+			schema.Fields = schemaOfType(unwrap(f.Type), depth+1)
 		}
 		out = append(out, schema)
 	}

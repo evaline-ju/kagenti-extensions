@@ -140,3 +140,30 @@ func TestSchemaOf_EnumWhitespaceAndEmpty(t *testing.T) {
 		t.Errorf("expected trimmed [on, off], got %+v", got)
 	}
 }
+
+// Self-referential pointer fields should not stack-overflow — the
+// depth bound in schemaOfType caps recursion. A linked-list-style
+// node (Next *node) is the canonical case.
+func TestSchemaOf_SelfReferentialIsBounded(t *testing.T) {
+	type node struct {
+		Name string `json:"name"`
+		Next *node  `json:"next"`
+	}
+	// Should return without panicking and emit a finite schema.
+	got := SchemaOf(node{})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 top-level fields, got %d", len(got))
+	}
+	// The recursion eventually returns nil at depth > maxSchemaDepth,
+	// so somewhere in the nested chain Fields is nil. Walk down and
+	// confirm we don't loop forever (the test itself would hang).
+	depth := 0
+	cur := got[1] // "next"
+	for cur.Type == "object" && len(cur.Fields) >= 2 {
+		depth++
+		if depth > maxSchemaDepth+5 {
+			t.Fatalf("recursion not bounded; reached depth %d", depth)
+		}
+		cur = cur.Fields[1]
+	}
+}

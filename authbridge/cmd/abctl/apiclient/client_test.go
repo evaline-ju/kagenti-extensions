@@ -179,6 +179,81 @@ func TestGetPluginCatalog(t *testing.T) {
 	}
 }
 
+// TestGetPluginCatalog_DecodesFieldSchemas guards against tag drift
+// between server-side FieldSchemaEntry (authlib/sessionapi/server.go)
+// and client-side PluginFieldEntry (here in apiclient). Every JSON
+// key the server emits must decode into the matching Go field, or the
+// abctl edit templates renderer silently loses metadata. Covers
+// nested fields too — token-exchange's identity sub-schema is the
+// real-world use case.
+func TestGetPluginCatalog_DecodesFieldSchemas(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/plugins" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"plugins": [
+				{
+					"name": "te",
+					"description": "Token exchange.",
+					"fields": [
+						{"name": "token_url", "type": "string", "description": "Endpoint."},
+						{
+							"name": "identity",
+							"type": "object",
+							"description": "Client credentials.",
+							"fields": [
+								{"name": "type", "type": "string", "required": true,
+								 "description": "Scheme.", "enum": ["spiffe", "client-secret"]},
+								{"name": "timeout_ms", "type": "int", "default": "5000"}
+							]
+						}
+					]
+				}
+			]
+		}`))
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL)
+	cat, err := c.GetPluginCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("GetPluginCatalog: %v", err)
+	}
+	if len(cat.Plugins) != 1 || len(cat.Plugins[0].Fields) != 2 {
+		t.Fatalf("unexpected catalog shape: %+v", cat)
+	}
+	te := cat.Plugins[0]
+
+	tokenURL := te.Fields[0]
+	if tokenURL.Name != "token_url" || tokenURL.Type != "string" || tokenURL.Description != "Endpoint." {
+		t.Errorf("token_url decode mismatch: %+v", tokenURL)
+	}
+
+	id := te.Fields[1]
+	if id.Name != "identity" || id.Type != "object" || id.Description != "Client credentials." {
+		t.Errorf("identity decode mismatch: %+v", id)
+	}
+	if len(id.Fields) != 2 {
+		t.Fatalf("identity.Fields = %d, want 2", len(id.Fields))
+	}
+
+	idType := id.Fields[0]
+	if idType.Name != "type" || !idType.Required || idType.Description != "Scheme." {
+		t.Errorf("identity.type decode mismatch: %+v", idType)
+	}
+	if len(idType.Enum) != 2 || idType.Enum[0] != "spiffe" || idType.Enum[1] != "client-secret" {
+		t.Errorf("identity.type.enum = %v", idType.Enum)
+	}
+
+	timeout := id.Fields[1]
+	if timeout.Name != "timeout_ms" || timeout.Type != "int" || timeout.Default != "5000" {
+		t.Errorf("identity.timeout_ms decode mismatch: %+v", timeout)
+	}
+}
+
 // TestPipelinePluginDecodesCapabilityMetadata verifies the new
 // metadata fields decode correctly through the apiclient.
 func TestPipelinePluginDecodesCapabilityMetadata(t *testing.T) {
