@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/placeholder"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
@@ -99,6 +101,9 @@ type jwtValidationConfig struct {
 	// BypassPaths are URL path globs (see authlib/bypass) that skip
 	// validation entirely.
 	BypassPaths []string `json:"bypass_paths" description:"Path globs (path.Match) skipped without JWT validation. Defaults: /healthz /readyz /livez /.well-known/*."`
+
+	PlaceholderMode bool   `json:"placeholder_mode" default:"false" description:"After validating the inbound token, replace it with an opaque placeholder before forwarding to the agent; the real token is held in the shared store for the outbound path to resolve. Requires a shared store and token-exchange resolve_placeholders downstream."`
+	PlaceholderTTL  string `json:"placeholder_ttl" default:"1h" description:"How long the real token is retained for outbound resolution (Go duration, e.g. 30m). Default 1h."`
 }
 
 func (c *jwtValidationConfig) applyDefaults() {
@@ -201,6 +206,8 @@ type JWTValidation struct {
 	// so the lock-free guarantee is future-proofing rather than a
 	// correctness fix for current callers.
 	bgCancel atomic.Pointer[context.CancelFunc]
+
+	placeholderTTL time.Duration
 }
 
 // NewJWTValidation constructs an unconfigured plugin. Configure must be
@@ -290,6 +297,15 @@ func (p *JWTValidation) Configure(raw json.RawMessage) error {
 		Bypass:   matcher,
 		Identity: auth.IdentityConfig{Audiences: audiences, Issuer: c.Issuer},
 	})
+
+	p.placeholderTTL = time.Hour
+	if c.PlaceholderTTL != "" {
+		d, err := time.ParseDuration(c.PlaceholderTTL)
+		if err != nil {
+			return fmt.Errorf("jwt-validation: invalid placeholder_ttl %q: %w", c.PlaceholderTTL, err)
+		}
+		p.placeholderTTL = d
+	}
 	return nil
 }
 
@@ -344,6 +360,26 @@ func (p *JWTValidation) Shutdown(_ context.Context) error {
 		(*cancel)()
 	}
 	return nil
+}
+
+// mint replaces the validated Authorization header with an opaque placeholder
+// and stores the real bearer token in the shared store. Returns the handle,
+// the stored token, and ok=false (fail closed) when no store is wired.
+func (p *JWTValidation) mint(pctx *pipeline.Context) (handle, real string, ok bool) {
+	if pctx.Shared == nil {
+		return "", "", false
+	}
+	real = auth.ExtractBearer(pctx.Headers.Get("Authorization"))
+	if real == "" {
+		return "", "", false
+	}
+	h, err := placeholder.New()
+	if err != nil {
+		return "", "", false
+	}
+	pctx.Shared.Put(placeholder.Key(h), real, p.placeholderTTL)
+	pctx.Headers.Set("Authorization", "Bearer "+h)
+	return h, real, true
 }
 
 func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.Action {
@@ -410,6 +446,21 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			"token_scopes":   strings.Join(result.Claims.Scopes, " "),
 		},
 	})
+	if p.cfg.PlaceholderMode {
+		handle, _, ok := p.mint(pctx)
+		if !ok {
+			pctx.Record(pipeline.Invocation{
+				Action: pipeline.ActionDeny,
+				Reason: "placeholder_mint_failed",
+			})
+			return pipeline.DenyStatus(503, "upstream.unreachable", "placeholder_mode requires a shared store")
+		}
+		pctx.Record(pipeline.Invocation{
+			Action:  pipeline.ActionModify,
+			Reason:  "placeholder_minted",
+			Details: map[string]string{"handle_prefix": handle[:len(placeholder.Prefix)+6]},
+		})
+	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
