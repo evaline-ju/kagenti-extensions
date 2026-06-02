@@ -78,3 +78,60 @@ func TestExtProc_Inbound_AuthorizationMutation(t *testing.T) {
 		t.Errorf("authorization = %q, want %q", got, "Bearer abph_minted")
 	}
 }
+
+// bodyHeaderValue extracts the value for the named SetHeaders key from a
+// RequestBody ProcessingResponse. The body path (replaceTokenBodyResponse
+// wrapped by withBodyMutation) nests the SetHeaders mutation inside the
+// RequestBody's CommonResponse rather than the RequestHeaders response that
+// setHeaderValue reads, so it needs its own accessor. replaceTokenBodyResponse
+// stores the value in RawValue; fall back to Value for robustness. Returns
+// ("", false) when the key is absent.
+func bodyHeaderValue(resp *extprocv3.ProcessingResponse, key string) (string, bool) {
+	rb := resp.GetRequestBody()
+	if rb == nil || rb.GetResponse() == nil || rb.GetResponse().GetHeaderMutation() == nil {
+		return "", false
+	}
+	for _, h := range rb.GetResponse().GetHeaderMutation().GetSetHeaders() {
+		hv := h.GetHeader()
+		if hv == nil || hv.GetKey() != key {
+			continue
+		}
+		if rv := hv.GetRawValue(); len(rv) > 0 {
+			return string(rv), true
+		}
+		return hv.GetValue(), true
+	}
+	return "", false
+}
+
+// TestExtProc_InboundBody_AuthorizationMutation mirrors
+// TestExtProc_Inbound_AuthorizationMutation but exercises the body path
+// (handleInboundBody) instead of the header path. A plugin that rewrites the
+// inbound Authorization header must cause handleInboundBody to emit a
+// SetHeaders mutation carrying the new value — nested in the RequestBody
+// response via replaceTokenBodyResponse/withBodyMutation — so Envoy rewrites
+// the request to the agent on the body phase too.
+func TestExtProc_InboundBody_AuthorizationMutation(t *testing.T) {
+	p, err := pipeline.New([]pipeline.Plugin{mintPlugin{}})
+	if err != nil {
+		t.Fatalf("building pipeline: %v", err)
+	}
+	srv := &Server{InboundPipeline: pipeline.NewHolder(p)}
+
+	stream := &mockStream{ctx: context.Background()}
+	headers := makeHeaders(
+		"x-authbridge-direction", "inbound",
+		"authorization", "Bearer real-user-token",
+		":path", "/api/test",
+	)
+
+	resp, _ := srv.handleInboundBody(stream, headers, []byte("{}"))
+
+	got, ok := bodyHeaderValue(resp, "authorization")
+	if !ok {
+		t.Fatalf("expected SetHeaders mutation for authorization in body response, got %+v", resp)
+	}
+	if got != "Bearer abph_minted" {
+		t.Errorf("authorization = %q, want %q", got, "Bearer abph_minted")
+	}
+}
