@@ -216,7 +216,11 @@ type model struct {
 	catalogTbl   table.Model
 	detailVp     viewport.Model
 	detailEvent  *pipeline.SessionEvent
-	detailPlugin *apiclient.PipelinePlugin
+	// detailInvocation is the plugin invocation selected in the events pane
+	// when the detail view was opened. Used to re-scope the event to that
+	// plugin on resize/re-render. nil means "whole event" (no invocation).
+	detailInvocation *pipeline.Invocation
+	detailPlugin     *apiclient.PipelinePlugin
 	filterInput  textinput.Model
 
 	// visibleRows holds the invocationRow spec for each rendered row in

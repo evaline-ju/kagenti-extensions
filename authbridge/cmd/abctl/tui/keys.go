@@ -207,7 +207,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			if ev == nil {
 				return nil
 			}
-			m.showDetail(ev)
+			m.showDetail(ev, m.selectedInvocation())
 			m.pane = paneDetail
 			return nil
 		case panePipeline:
@@ -476,7 +476,7 @@ func (m *model) layout() {
 	// Re-wrap the detail viewport to the new width so long JSON values
 	// continue to fit after a terminal resize.
 	if m.detailEvent != nil {
-		m.showDetail(m.detailEvent)
+		m.showDetail(m.detailEvent, m.detailInvocation)
 	}
 }
 

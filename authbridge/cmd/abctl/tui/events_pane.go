@@ -184,6 +184,19 @@ func (m *model) selectedEvent() *pipeline.SessionEvent {
 	return m.visibleRows[cur].event
 }
 
+// selectedInvocation returns the plugin invocation for the highlighted events
+// row, or nil (pseudo-row for an event with no invocations, or no rows).
+func (m *model) selectedInvocation() *pipeline.Invocation {
+	if len(m.visibleRows) == 0 {
+		return nil
+	}
+	cur := m.eventsTbl.Cursor()
+	if cur < 0 || cur >= len(m.visibleRows) {
+		return nil
+	}
+	return m.visibleRows[cur].inv
+}
+
 // invocationRow is one table row — the cartesian product of SessionEvent
 // × Invocation. An event with N plugin invocations produces N rows; an
 // event with no invocations produces one row with an empty invocation.
