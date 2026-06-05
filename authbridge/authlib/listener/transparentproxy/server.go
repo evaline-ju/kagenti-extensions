@@ -76,5 +76,19 @@ func (s *Server) dispatch(conn *net.TCPConn) {
 		_ = conn.Close()
 		return
 	}
+	// Defense-in-depth against a self-redirect loop: a genuinely REDIRECTed
+	// connection never has a loopback original destination (the enforce-redirect
+	// iptables rules RETURN loopback before the REDIRECT). So a loopback dst here
+	// means a direct dial to the listener port, where SO_ORIGINAL_DST reports the
+	// listener's own address — tunnelling to it would spiral into ever more
+	// connections/goroutines. Drop it.
+	if host, _, splitErr := net.SplitHostPort(dst); splitErr == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			slog.Warn("transparent-proxy: dropping connection whose original destination is loopback (not a redirect; would self-loop)",
+				"remote", conn.RemoteAddr().String(), "dst", dst)
+			_ = conn.Close()
+			return
+		}
+	}
 	s.handle(conn, dst)
 }

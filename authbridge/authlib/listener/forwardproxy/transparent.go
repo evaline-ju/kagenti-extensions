@@ -26,6 +26,18 @@ import (
 // gates, dials dst, and copies bytes both ways. dst is "host:port" recovered
 // from SO_ORIGINAL_DST by the transparent listener.
 //
+// GATING LIMITATION (important before enforce-redirect goes always-on):
+// CONNECT carries a hostname in r.Host, so the outbound pipeline gates captured
+// CONNECT traffic on the domain (e.g. "api.openai.com:443"). SO_ORIGINAL_DST
+// yields only an IP:port, so here pctx.Host is an IP literal. Any host/domain-
+// based egress policy (allowlist-by-domain, host->audience routing) therefore
+// does NOT match captured bypass traffic the way it matches explicit-proxy
+// traffic — the gate runs, but sees an IP. This is acceptable while the operator
+// flag keeps enforce-redirect opt-in, but the always-on operator PR MUST first
+// either (a) peek the TLS ClientHello SNI here and set pctx.Host to the SNI
+// hostname for parity with CONNECT, or (b) consciously accept IP-level egress
+// policy for captured traffic. Tracked as a prerequisite for the default flip.
+//
 // HandleTransparentConn owns clientConn's lifecycle and always closes it.
 func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 	defer func() { _ = clientConn.Close() }()
