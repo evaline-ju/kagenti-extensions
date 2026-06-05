@@ -26,21 +26,45 @@ import (
 // gates, dials dst, and copies bytes both ways. dst is "host:port" recovered
 // from SO_ORIGINAL_DST by the transparent listener.
 //
-// GATING LIMITATION (important before enforce-redirect goes always-on):
-// CONNECT carries a hostname in r.Host, so the outbound pipeline gates captured
-// CONNECT traffic on the domain (e.g. "api.openai.com:443"). SO_ORIGINAL_DST
-// yields only an IP:port, so here pctx.Host is an IP literal. Any host/domain-
-// based egress policy (allowlist-by-domain, host->audience routing) therefore
-// does NOT match captured bypass traffic the way it matches explicit-proxy
-// traffic — the gate runs, but sees an IP. This is acceptable while the operator
-// flag keeps enforce-redirect opt-in, but the always-on operator PR MUST first
-// either (a) peek the TLS ClientHello SNI here and set pctx.Host to the SNI
-// hostname for parity with CONNECT, or (b) consciously accept IP-level egress
-// policy for captured traffic. Tracked as a prerequisite for the default flip.
+// HOSTNAME RECOVERY: CONNECT carries a hostname in r.Host, but SO_ORIGINAL_DST
+// yields only an IP:port. To give host/domain egress policy parity with the
+// CONNECT path, we sniff the connection's first bytes for the destination name
+// — the TLS ClientHello SNI for HTTPS, or the HTTP Host header for plaintext
+// HTTP — and use it as pctx.Host. If neither can be recovered we fall back to
+// the IP. The dial target ALWAYS stays the SO_ORIGINAL_DST IP (dst); the name is
+// only the policy key.
+//
+// Trust caveat (relevant before enforce-redirect goes always-on): for captured
+// traffic the agent controls both the SNI/Host and, separately, the IP the
+// bytes actually go to, so a *malicious* agent could present an allowed name
+// while connecting to another IP. Name-based policy here is therefore reliable
+// against a cooperative/misconfigured agent (the motivating case) but is not a
+// hard control against a hostile one — only the IP is ground truth. Hard
+// enforcement would need IP-set allowlists or SNI/cert cross-checks.
 //
 // HandleTransparentConn owns clientConn's lifecycle and always closes it.
 func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 	defer func() { _ = clientConn.Close() }()
+
+	// Keepalive on the raw client conn before sniffing wraps it (the wrapper is
+	// not a *net.TCPConn, so enableKeepalive would no-op on it).
+	enableKeepalive(clientConn)
+
+	// Recover the destination hostname for policy parity with CONNECT. Gated to
+	// HTTP/TLS ports so non-HTTP protocols are not delayed by the peek. The dial
+	// target stays dst (the IP); only pctx.Host gets the recovered name.
+	host := dst
+	if shouldSniff(dst) {
+		name, wrapped := sniffHost(clientConn)
+		clientConn = wrapped
+		if name != "" {
+			if _, port, err := net.SplitHostPort(dst); err == nil {
+				host = net.JoinHostPort(name, port)
+			}
+			slog.Debug("transparent-proxy: recovered destination host for policy",
+				"host", name, "dst", dst)
+		}
+	}
 
 	// Background context: there is no inbound *http.Request to tie cancellation
 	// to. Tunnel teardown (either side closing) is what ends the connection;
@@ -51,7 +75,7 @@ func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 		Direction: pipeline.Outbound,
 		Method:    http.MethodConnect, // synthetic: opaque tunnel, parity with handleConnect
 		Scheme:    "tcp",              // marker: bytes are opaque, not HTTP
-		Host:      dst,
+		Host:      host,
 		Headers:   http.Header{},
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
@@ -71,19 +95,20 @@ func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordOutboundReject(pctx, action)
-		slog.Warn("transparent-proxy: outbound rejected by policy", "host", dst)
+		slog.Warn("transparent-proxy: outbound rejected by policy", "host", host)
 		return
 	}
 
+	// Always dial the original IP (dst), never the sniffed name — the agent
+	// already chose the IP, and re-resolving the name could diverge from it.
 	upstream, err := net.DialTimeout("tcp", dst, connectDialTimeout)
 	if err != nil {
-		slog.Warn("transparent-proxy: upstream dial failed", "host", dst, "error", err)
+		slog.Warn("transparent-proxy: upstream dial failed", "host", host, "dst", dst, "error", err)
 		return
 	}
 	defer func() { _ = upstream.Close() }()
 
 	enableKeepalive(upstream)
-	enableKeepalive(clientConn)
 
 	s.recordTunnelOpened(pctx)
 	tunnel(clientConn, upstream)
