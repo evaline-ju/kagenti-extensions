@@ -4,8 +4,10 @@
 package extproc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -20,6 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/internal/sseframe"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 )
@@ -559,6 +562,16 @@ func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.Head
 		return rejectFromAction(action)
 	}
 
+	// Body-less response: deliver an empty last=true frame so
+	// StreamingResponder plugins can finalize (and emit no_response_body
+	// Skip rows for pairing). Mirrors the buffered-body path's single
+	// last=true dispatch.
+	if p.HasStreamingResponders() {
+		if frameAction := p.RunResponseFrame(ctx, pctx, nil, true); frameAction.Type == pipeline.Reject {
+			return rejectFromAction(frameAction)
+		}
+	}
+
 	// No body phase will run; record the response event here. A2A responses
 	// need the body to extract contextId, so the rekey path is body-only;
 	// skip it on this header-only path.
@@ -594,6 +607,22 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 	action := p.RunResponse(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		return rejectFromAction(action)
+	}
+
+	// Streaming-aware plugins use a single code path for both shapes
+	// (mirrors forwardproxy/reverseproxy). pipeline.RunResponse skips
+	// StreamingResponder plugins so they wouldn't get a response-phase
+	// dispatch otherwise; deliver the buffered body via RunResponseFrame
+	// so mcp/inference/a2a parsers populate their response state and
+	// the inbound A2A contextId rekey below sees pctx.Extensions.A2A
+	// fully populated. For text/event-stream bodies (Envoy already
+	// buffered them at this point), re-parse with sseframe so each
+	// event arrives as its own frame; otherwise dispatch the whole
+	// body as one last=true frame.
+	if p.HasStreamingResponders() {
+		if frameAction := dispatchBufferedFrames(ctx, p, pctx); frameAction.Type == pipeline.Reject {
+			return rejectFromAction(frameAction)
+		}
 	}
 
 	// The server's response may carry the server-assigned A2A contextId. If
@@ -848,4 +877,52 @@ func getHeader(headers *corev3.HeaderMap, key string) string {
 		}
 	}
 	return ""
+}
+
+// dispatchBufferedFrames feeds the buffered response body to
+// StreamingResponder plugins via RunResponseFrame, mirroring the
+// proxy listeners' single-dispatch contract for buffered bodies.
+// Envoy's ext_proc delivers response bodies pre-buffered (we requested
+// ResponseBodyMode_BUFFERED via ModeOverride), so we get the whole
+// body in one shot regardless of upstream framing.
+//
+// For application/json the entire body is one last=true frame, so
+// non-streaming JSON-RPC responses look the same to plugins as on
+// the proxy listeners. For text/event-stream we re-parse with
+// sseframe so each event arrives as its own non-last frame followed
+// by a final last=true — matches the per-message dispatch shape
+// streaming-aware plugins expect.
+func dispatchBufferedFrames(ctx context.Context, p *pipeline.Holder, pctx *pipeline.Context) pipeline.Action {
+	contentType := pctx.ResponseHeaders.Get("Content-Type")
+	if isEventStream(contentType) && len(pctx.ResponseBody) > 0 {
+		reader := sseframe.NewReader(bytes.NewReader(pctx.ResponseBody), maxBodySize)
+		for {
+			frame, err := reader.ReadFrame()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				slog.Warn("extproc: SSE re-parse error", "error", err)
+				break
+			}
+			if action := p.RunResponseFrame(ctx, pctx, frame, false); action.Type == pipeline.Reject {
+				return action
+			}
+		}
+		return p.RunResponseFrame(ctx, pctx, nil, true)
+	}
+	return p.RunResponseFrame(ctx, pctx, pctx.ResponseBody, true)
+}
+
+// isEventStream reports whether a Content-Type header value names the
+// SSE media type. Tolerates parameters and ASCII case differences.
+// Mirrors the helpers in forwardproxy/reverseproxy.
+func isEventStream(contentType string) bool {
+	if contentType == "" {
+		return false
+	}
+	if idx := strings.IndexByte(contentType, ';'); idx >= 0 {
+		contentType = contentType[:idx]
+	}
+	return strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream")
 }
