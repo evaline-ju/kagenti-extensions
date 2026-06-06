@@ -738,41 +738,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Record a SessionRequest event so /v1/sessions and abctl show that
 	// a tunnel was opened. Mirrors the HTTP path's post-Allow recording
-	// (see handleRequest above). The MCP / Inference snapshots are nil
-	// by definition (CONNECT bytes are opaque), but Invocations from
-	// gate plugins (ibac, token-exchange's skip/no_route, etc.) and
-	// any plugin-public Plugins entries are still meaningful.
-	if s.Sessions != nil {
-		sid := s.Sessions.ActiveSession()
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
-		plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
-		ev := pipeline.SessionEvent{
-			At:          time.Now(),
-			Direction:   pipeline.Outbound,
-			Phase:       pipeline.SessionRequest,
-			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-			Plugins:     plugins,
-			Identity:    pipeline.SnapshotIdentity(pctx),
-			Host:        pctx.Host,
-		}
-		if ev.Invocations != nil || plugins != nil {
-			s.Sessions.Append(sid, ev)
-		}
-	}
+	// (see handleRequest above). Shared with the transparent-redirect path.
+	s.recordTunnelOpened(pctx)
 
-	// Bidirectional copy. When either side closes, propagate the close
-	// to the other so both io.Copy goroutines exit. Close-on-each-side
-	// is idempotent on net.Conn.
-	go func() {
-		_, _ = io.Copy(upstream, clientConn)
-		_ = upstream.Close()
-		_ = clientConn.Close()
-	}()
-	_, _ = io.Copy(clientConn, upstream)
-	_ = clientConn.Close()
-	_ = upstream.Close()
+	// Bidirectional copy until either side closes.
+	tunnel(clientConn, upstream)
 }
 
 // writeSSEFrame writes one SSE event built from a sseframe-decoded

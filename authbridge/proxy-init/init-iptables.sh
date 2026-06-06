@@ -128,18 +128,23 @@ set -e
 
 # --- Mode selection ---
 # MODE selects the interception strategy:
-#   redirect      (default) — envoy-sidecar: transparently REDIRECT pod traffic
-#                 to the Envoy listeners (the behavior documented above).
-#   enforce-drop  — proxy-sidecar: a fail-closed egress guard. The app is
-#                 configured with HTTP_PROXY pointing at AuthBridge's forward
-#                 proxy; this mode DROPs any egress that bypasses the proxy,
-#                 forcing all external traffic through AuthBridge regardless of
-#                 whether the app honors HTTP_PROXY. It installs no REDIRECT and
-#                 no PREROUTING/inbound rules. See setup_enforce_drop() below.
+#   redirect          (default) — envoy-sidecar: transparently REDIRECT pod
+#                     traffic to the Envoy listeners (the behavior documented
+#                     above).
+#   enforce-redirect  — proxy-sidecar: a fail-closed egress guard that CAPTURES
+#                     rather than drops. External TCP egress that bypasses the
+#                     forward proxy is transparently REDIRECTed to AuthBridge's
+#                     transparent listener (TRANSPARENT_PORT), which recovers the
+#                     original destination via SO_ORIGINAL_DST and tunnels it
+#                     through the same outbound pipeline. Non-TCP external egress
+#                     (UDP/QUIC) is DROPped so it cannot bypass via HTTP/3.
+#                     In-cluster + loopback + proxy-UID traffic is left direct.
+#                     Nothing breaks for agents that ignore HTTP_PROXY — their
+#                     traffic is captured, not dropped. See setup_enforce_redirect().
 MODE="${MODE:-redirect}"
 case "${MODE}" in
-  redirect|enforce-drop) ;;
-  *) echo "ERROR: unknown MODE='${MODE}' (expected: redirect | enforce-drop)" >&2; exit 1 ;;
+  redirect|enforce-redirect) ;;
+  *) echo "ERROR: unknown MODE='${MODE}' (expected: redirect | enforce-redirect)" >&2; exit 1 ;;
 esac
 
 # --- Auto-detect iptables backend ---
@@ -164,15 +169,20 @@ echo "Using iptables command: ${IPT} ($(${IPT} --version 2>/dev/null || echo 'un
 
 PROXY_PORT="${PROXY_PORT:-15123}"
 INBOUND_PROXY_PORT="${INBOUND_PROXY_PORT:-15124}"
+# enforce-redirect mode: the forward proxy's transparent listener port, the
+# REDIRECT target for captured external TCP egress. Must match the authbridge
+# proxy-sidecar listener.transparent_proxy_addr (default :8082).
+TRANSPARENT_PORT="${TRANSPARENT_PORT:-8082}"
 PROXY_UID="${PROXY_UID:-1337}"
 SSH_PORT="${SSH_PORT:-22}"
 OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
 INBOUND_PORTS_EXCLUDE="${INBOUND_PORTS_EXCLUDE:-}"
 
-# enforce-drop mode: in-cluster destinations the agent may reach directly
-# (pods / services / DNS) — everything else egressing the pod is dropped.
-# Defaults to the RFC1918 10/8 block which covers typical Kind pod (10.244/16)
-# and service (10.96/16) CIDRs; override with the cluster's actual ranges.
+# enforce-redirect mode: in-cluster destinations the agent may reach directly
+# (pods / services / DNS) — external TCP is REDIRECTed to the transparent
+# listener and external non-TCP is dropped. Defaults to the RFC1918 10/8 block
+# which covers typical Kind pod (10.244/16) and service (10.96/16) CIDRs;
+# override with the cluster's actual ranges.
 CLUSTER_CIDRS="${CLUSTER_CIDRS:-10.0.0.0/8}"
 CLUSTER_CIDRS6="${CLUSTER_CIDRS6:-}"   # IPv6 in-cluster CIDRs (dual-stack); empty = none
 
@@ -190,7 +200,7 @@ ISTIO_HEALTH_PROBE_SRC="${ISTIO_HEALTH_PROBE_SRC:-169.254.7.127}"
 # We use DNAT to the pod IP instead of REDIRECT to avoid needing route_localnet=1,
 # which would require a privileged init container (to write to read-only /proc/sys).
 # POD_IP is only needed by redirect mode (DNAT target for the ambient inbound
-# rule). enforce-drop does no DNAT, so it does not require it.
+# rule). enforce-redirect does no DNAT, so it does not require it.
 if [ "${MODE}" = "redirect" ] && [ -z "${POD_IP}" ]; then
   echo "ERROR: POD_IP environment variable is not set (required for redirect mode)." >&2
   echo "Set it via the Kubernetes Downward API (status.podIP) or manually." >&2
@@ -198,103 +208,140 @@ if [ "${MODE}" = "redirect" ] && [ -z "${POD_IP}" ]; then
 fi
 
 # =============================================================================
-# enforce-drop mode (proxy-sidecar fail-closed egress guard)
+# enforce-redirect mode (proxy-sidecar fail-closed egress guard, capture variant)
 # =============================================================================
 #
-# proxy-sidecar configures the app with HTTP_PROXY=127.0.0.1:<forward-proxy>.
-# Unlike redirect mode we do NOT transparently REDIRECT — you cannot redirect
-# raw traffic into a CONNECT forward proxy. Instead we DROP any egress that
-# leaves the pod without going through the proxy, forcing all external traffic
-# through AuthBridge regardless of whether the app honors HTTP_PROXY.
+# Forces all external egress through AuthBridge regardless of whether the app
+# honors HTTP_PROXY, by CAPTURING bypass traffic: external TCP is transparently
+# REDIRECTed to the forward proxy's transparent listener (TRANSPARENT_PORT),
+# which recovers the original destination via SO_ORIGINAL_DST and tunnels it
+# through the same outbound pipeline. Because nothing is dropped, agents that
+# ignore HTTP_PROXY keep working — this is what lets enforcement be always-on.
 #
-# Placement — a dedicated chain hooked from *mangle* OUTPUT at position 1:
-#   * Istio ambient, when active, installs an in-pod `nat OUTPUT` REDIRECT
-#     (ISTIO_OUTPUT -> ztunnel :15001). The netfilter OUTPUT hook order is
-#     raw -> mangle -> nat -> filter, so a DROP in mangle evaluates the
-#     ORIGINAL destination and fires BEFORE ambient's nat redirect can rewrite
-#     it. A DROP in `filter` would run after nat and be defeated (dst already
-#     rewritten to 127.0.0.1). -I 1 also places us ahead of Istio's appended
-#     (-A) mangle ISTIO_OUTPUT chain.
-#   * Works identically with no ambient, in-pod ambient, or node-level ambient
-#     (in the node-level case our pod-netns rule runs before the packet ever
-#     reaches the host netns).
+# Placement — a dedicated chain hooked from *nat* OUTPUT at position 1 (REDIRECT
+# is a nat-table target). Inserted before Istio's appended ISTIO_OUTPUT so we
+# preempt ambient's nat redirect for external destinations, exactly as
+# redirect mode does for the Envoy path.
 #
-# Rule order in the chain: RETURN ztunnel's own sockets (fwmark 0x539, a no-op
-# when ambient is absent) -> RETURN the proxy's own egress (PROXY_UID) ->
-# RETURN loopback (app -> proxy) -> RETURN in-cluster CIDRs (mesh/DNS) ->
-# DROP everything else (direct external egress, incl. UDP/QUIC).
-setup_enforce_drop() {
-  CHAIN="AB_EGRESS"
+# Rule order: RETURN ztunnel's own sockets (fwmark 0x539, no-op without ambient)
+# -> RETURN the proxy's own re-originated egress (PROXY_UID, avoids the loop) ->
+# RETURN loopback (app -> forward proxy via HTTP_PROXY, and any loopback) ->
+# RETURN in-cluster CIDRs (mesh/DNS, left direct) -> REDIRECT external TCP to
+# TRANSPARENT_PORT -> DROP all other external egress (UDP/QUIC, so HTTP/3 can't
+# bypass; well-behaved clients fall back to TCP and get captured).
+#
+# The nat REDIRECT chain has no conntrack ESTABLISHED rule: nat only evaluates
+# the first packet of a flow, so replies and established connections are not
+# re-translated.
+# Two chains are needed because REDIRECT is a nat-table target but the nat table
+# forbids DROP ("the use of DROP is therefore inhibited"):
+#   * nat   OUTPUT / AB_REDIRECT — REDIRECT external TCP to TRANSPARENT_PORT.
+#   * mangle OUTPUT / AB_NOTCP   — DROP external non-TCP (UDP/QUIC) so HTTP/3
+#                                  cannot bypass; `-p tcp -j RETURN` lets TCP
+#                                  fall through to the nat REDIRECT.
+# mangle runs before nat in the OUTPUT hook, so non-TCP is dropped on its
+# original destination and TCP is passed to the nat REDIRECT. Both are inserted
+# at position 1 to precede Istio's appended chains.
+setup_enforce_redirect() {
+  REDIR_CHAIN="AB_REDIRECT"
+  NOTCP_CHAIN="AB_NOTCP"
 
-  echo "enforce-drop: installing fail-closed egress guard (mangle OUTPUT, chain ${CHAIN})"
-  echo "enforce-drop: exempt proxy UID=${PROXY_UID}; allowed in-cluster CIDRs=${CLUSTER_CIDRS}"
+  echo "enforce-redirect: installing fail-closed egress capture"
+  echo "enforce-redirect: external TCP -> 127.0.0.1:${TRANSPARENT_PORT} (nat REDIRECT); external non-TCP -> DROP (mangle)"
+  echo "enforce-redirect: exempt proxy UID=${PROXY_UID}; direct in-cluster CIDRs=${CLUSTER_CIDRS}"
 
-  # --- IPv4 ---
-  ${IPT} -t mangle -N "${CHAIN}" 2>/dev/null || true
-  ${IPT} -t mangle -F "${CHAIN}"
-  # Replies to inbound connections (and related flows) are locally generated and
-  # also traverse OUTPUT — a reply is never a "bypass". Let established/related
-  # traffic through FIRST, so e.g. kubelet health-probe responses to an
-  # off-cluster node IP (in Kind the node is 172.18.0.0/16, outside CLUSTER_CIDRS)
-  # are not caught by the terminal DROP. Only NEW app-initiated flows are gated.
-  ${IPT} -t mangle -A "${CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-  # ztunnel's own sockets (ambient) carry fwmark 0x539 — let them through so the
-  # mesh/HBONE path keeps working. No-op when ambient is not installed.
-  ${IPT} -t mangle -A "${CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
-  # the AuthBridge proxy's own re-originated egress (must run as PROXY_UID).
-  ${IPT} -t mangle -A "${CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
-  # app -> proxy over loopback (HTTP_PROXY target), and any loopback traffic.
-  ${IPT} -t mangle -A "${CHAIN}" -o lo -j RETURN
-  ${IPT} -t mangle -A "${CHAIN}" -d 127.0.0.0/8 -j RETURN
-  # in-cluster traffic (pods / services / DNS) — carried by the mesh, not the proxy.
+  # --- IPv4: nat REDIRECT for TCP ---
+  ${IPT} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
+  ${IPT} -t nat -F "${REDIR_CHAIN}"
+  # ztunnel's own sockets (ambient) carry fwmark 0x539 — let them through.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+  # the AuthBridge proxy's own re-originated egress (runs as PROXY_UID) — avoids
+  # redirecting the proxy's upstream dial back into itself.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+  # app -> forward proxy over loopback (HTTP_PROXY target), and any loopback.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -d 127.0.0.0/8 -j RETURN
+  # in-cluster traffic (pods / services / DNS) — left direct, carried by the mesh.
   for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
-    [ -n "${cidr}" ] && ${IPT} -t mangle -A "${CHAIN}" -d "${cidr}" -j RETURN
+    [ -n "${cidr}" ] && ${IPT} -t nat -A "${REDIR_CHAIN}" -d "${cidr}" -j RETURN
   done
-  # everything else == direct external egress that bypassed the proxy. Drop it.
-  # No -p filter, so UDP (QUIC/HTTP-3) is dropped as well as TCP.
-  ${IPT} -t mangle -A "${CHAIN}" -j DROP
-  # Hook at position 1 so we run before any appended Istio mangle chain and
-  # before nat OUTPUT.
-  if ! ${IPT} -t mangle -C OUTPUT -j "${CHAIN}" 2>/dev/null; then
-    ${IPT} -t mangle -I OUTPUT 1 -j "${CHAIN}"
+  # external TCP that bypassed the forward proxy — capture it transparently.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
+  if ! ${IPT} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
+    ${IPT} -t nat -I OUTPUT 1 -j "${REDIR_CHAIN}"
   fi
-  echo "enforce-drop: IPv4 egress guard configured"
+
+  # --- IPv4: mangle DROP for non-TCP ---
+  ${IPT} -t mangle -N "${NOTCP_CHAIN}" 2>/dev/null || true
+  ${IPT} -t mangle -F "${NOTCP_CHAIN}"
+  # established/related replies (incl. UDP conntrack, e.g. DNS replies) first.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d 127.0.0.0/8 -j RETURN
+  for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
+    [ -n "${cidr}" ] && ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d "${cidr}" -j RETURN
+  done
+  # TCP is handled by the nat REDIRECT above — let it pass mangle untouched.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
+  # everything else == external non-TCP egress (UDP/QUIC) — drop it.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -j DROP
+  if ! ${IPT} -t mangle -C OUTPUT -j "${NOTCP_CHAIN}" 2>/dev/null; then
+    ${IPT} -t mangle -I OUTPUT 1 -j "${NOTCP_CHAIN}"
+  fi
+  echo "enforce-redirect: IPv4 egress capture configured"
 
   # --- IPv6 ---
-  # Cluster is IPv4-only by default; until v6 cluster CIDRs are wired
-  # (CLUSTER_CIDRS6), drop external v6 egress while allowing: established/related
-  # replies, loopback, link-local unicast (fe80::/10) and link-local multicast
-  # (ff02::/16, which carries NDP neighbor/router solicitations and MLD), the
-  # proxy UID, and ztunnel's mark.
-  if command -v "${IP6T%% *}" >/dev/null 2>&1 && ${IP6T} -t mangle -L >/dev/null 2>&1; then
-    ${IP6T} -t mangle -N "${CHAIN}" 2>/dev/null || true
-    ${IP6T} -t mangle -F "${CHAIN}"
-    ${IP6T} -t mangle -A "${CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-    ${IP6T} -t mangle -A "${CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
-    ${IP6T} -t mangle -A "${CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
-    ${IP6T} -t mangle -A "${CHAIN}" -o lo -j RETURN
-    ${IP6T} -t mangle -A "${CHAIN}" -d ::1/128 -j RETURN
-    ${IP6T} -t mangle -A "${CHAIN}" -d fe80::/10 -j RETURN
-    ${IP6T} -t mangle -A "${CHAIN}" -d ff02::/16 -j RETURN
+  # Mirror of IPv4. Until v6 cluster CIDRs are wired (CLUSTER_CIDRS6), allow
+  # loopback + link-local (fe80::/10 unicast, ff02::/16 NDP/MLD multicast) and
+  # the proxy UID / ztunnel mark; REDIRECT external v6 TCP; DROP other v6 egress.
+  if command -v "${IP6T%% *}" >/dev/null 2>&1 && ${IP6T} -t nat -L >/dev/null 2>&1; then
+    ${IP6T} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
+    ${IP6T} -t nat -F "${REDIR_CHAIN}"
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ::1/128 -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d fe80::/10 -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ff02::/16 -j RETURN
     for cidr in $(echo "${CLUSTER_CIDRS6}" | tr ',' ' '); do
-      [ -n "${cidr}" ] && ${IP6T} -t mangle -A "${CHAIN}" -d "${cidr}" -j RETURN
+      [ -n "${cidr}" ] && ${IP6T} -t nat -A "${REDIR_CHAIN}" -d "${cidr}" -j RETURN
     done
-    ${IP6T} -t mangle -A "${CHAIN}" -j DROP
-    if ! ${IP6T} -t mangle -C OUTPUT -j "${CHAIN}" 2>/dev/null; then
-      ${IP6T} -t mangle -I OUTPUT 1 -j "${CHAIN}"
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
+    if ! ${IP6T} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
+      ${IP6T} -t nat -I OUTPUT 1 -j "${REDIR_CHAIN}"
     fi
-    echo "enforce-drop: IPv6 egress guard configured"
+
+    ${IP6T} -t mangle -N "${NOTCP_CHAIN}" 2>/dev/null || true
+    ${IP6T} -t mangle -F "${NOTCP_CHAIN}"
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ::1/128 -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d fe80::/10 -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ff02::/16 -j RETURN
+    for cidr in $(echo "${CLUSTER_CIDRS6}" | tr ',' ' '); do
+      [ -n "${cidr}" ] && ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d "${cidr}" -j RETURN
+    done
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -j DROP
+    if ! ${IP6T} -t mangle -C OUTPUT -j "${NOTCP_CHAIN}" 2>/dev/null; then
+      ${IP6T} -t mangle -I OUTPUT 1 -j "${NOTCP_CHAIN}"
+    fi
+    echo "enforce-redirect: IPv6 egress capture configured"
   else
-    echo "enforce-drop: ip6tables unavailable — skipping IPv6 egress guard"
+    echo "enforce-redirect: ip6tables unavailable — skipping IPv6 egress capture"
   fi
 
-  echo "enforce-drop: fail-closed egress guard active"
+  echo "enforce-redirect: fail-closed egress capture active"
 }
 
-# Dispatch enforce-drop here and exit; redirect mode falls through to the
+# Dispatch enforce-redirect here and exit; redirect mode falls through to the
 # transparent-interception logic below.
-if [ "${MODE}" = "enforce-drop" ]; then
-  setup_enforce_drop
+if [ "${MODE}" = "enforce-redirect" ]; then
+  setup_enforce_redirect
   exit 0
 fi
 
