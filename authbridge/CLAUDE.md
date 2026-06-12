@@ -579,6 +579,15 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 
 10. **Outbound passthrough is the safe default**: The `DEFAULT_OUTBOUND_POLICY` defaults to `passthrough`, which means outbound traffic to LLM inference endpoints (e.g., Ollama via `host.docker.internal`) passes through without token exchange. If this were set to `exchange`, all outbound HTTP calls would attempt token exchange and fail for non-Keycloak destinations.
 
+11. **Chatty observability traffic can evict the IBAC user intent**: The session store is FIFO with a default cap of 100 events per session. If an outbound destination is high-volume (e.g., an OpenTelemetry collector sidecar that exports dozens of times per agent turn), each export becomes a session event and the original inbound A2A user intent rolls out the back of the buffer within seconds. IBAC then sees `LastIntent() == nil` and falls through to the `no_user_context` skip path with `sub_reason: no_intent`, allowing every tool call after the first without LLM-judged alignment. Mitigate by listing the offending hosts under `listener.skip_hosts` in the runtime config — matched destinations bypass the pipeline AND session recording entirely (transparent forward), so they no longer compete with agent-meaningful events for buffer slots. Patterns use the same `.`-delimited glob semantics as `authproxy-routes`; ports are stripped before matching. Example:
+    ```yaml
+    listener:
+      skip_hosts:
+        - "otel-collector.*.svc.cluster.local"
+        - "*.metrics.local"
+    ```
+    Any change to `listener.skip_hosts` requires a pod restart (same rule as other `listener.*` fields). Do NOT add hosts here that need IBAC / token-exchange policy applied — bypass means bypass.
+
 ## DCO Sign-Off (Mandatory)
 
 All commits **must** include a `Signed-off-by` trailer (Developer Certificate of Origin).

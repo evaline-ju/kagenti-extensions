@@ -334,6 +334,31 @@ type ListenerConfig struct {
 	// (JSON snapshots + SSE stream consumed by abctl or curl). Default per
 	// mode preset is ":9094". Set to empty string to disable the endpoint.
 	SessionAPIAddr string `yaml:"session_api_addr" json:"session_api_addr"`
+
+	// SkipHosts lists outbound destination host patterns whose traffic
+	// bypasses the plugin pipeline AND session recording entirely. The
+	// listener forwards matched requests as a transparent proxy without
+	// running plugins or appending events to any session bucket.
+	//
+	// Intended for high-volume infrastructure traffic that competes
+	// with agent-meaningful events for session-buffer slots. The
+	// canonical example: an OpenTelemetry collector sidecar that emits
+	// dozens of exports per agent turn — without this gate, those
+	// exports occupy the session buffer's FIFO eviction window and
+	// silently push out the inbound A2A user intent that IBAC needs
+	// to align tool calls against, causing IBAC to fall through to
+	// the no_intent skip path on every call after the first.
+	//
+	// Patterns use `.`-delimited glob semantics (same library as
+	// `authproxy-routes`): "otel-collector*" matches the short
+	// service name, "otel-collector.kagenti-system.svc.cluster.local"
+	// matches the FQDN, "*-collector" matches any single-label name
+	// ending in -collector. Port is stripped before matching, so
+	// patterns must NOT include `:port`.
+	//
+	// Empty list (default) preserves current behavior: every outbound
+	// host runs the pipeline and is eligible for session recording.
+	SkipHosts []string `yaml:"skip_hosts" json:"skip_hosts"`
 }
 
 // StatsConfig represents the configuration for reporting config and statistics
