@@ -54,7 +54,7 @@ func (d *Decision) Classify(host, ip string, port int, first []byte) (Verdict, s
 	if !d.ports[port] {
 		return Passthrough, "port"
 	}
-	if !looksLikeTLSClientHello(first) {
+	if !looksLikeTLSRecord(first) {
 		return Passthrough, "non-tls"
 	}
 	if d.skip[host] {
@@ -79,13 +79,15 @@ func (d *Decision) isInternal(ip string) bool {
 	return false
 }
 
-// looksLikeTLSClientHello validates the 5-byte TLS record header (not just 0x16):
-// content type 22 (handshake), legacy record version 0x03 0x01-0x04.
-func looksLikeTLSClientHello(b []byte) bool {
+// looksLikeTLSRecord validates the 5-byte TLS record header (not just 0x16):
+// content type 22 (handshake), legacy record version 0x03 with minor 0x01-0x04
+// (TLS 1.0–1.3; SSLv3's 0x0300 is rejected). It checks the record layer, not the
+// handshake message type.
+func looksLikeTLSRecord(b []byte) bool {
 	if len(b) < 5 {
 		return false
 	}
-	return b[0] == 0x16 && b[1] == 0x03 && b[2] <= 0x04
+	return b[0] == 0x16 && b[1] == 0x03 && b[2] >= 0x01 && b[2] <= 0x04
 }
 
 // SkipSet is the runtime auto-skip set (hosts whose minted leaf the client
