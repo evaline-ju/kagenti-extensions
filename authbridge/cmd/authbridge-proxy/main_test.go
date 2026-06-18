@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
 )
 
 func identityConfig(idType string) json.RawMessage {
@@ -51,5 +52,25 @@ func TestSpiffeProviderNeeded(t *testing.T) {
 				t.Errorf("spiffeProviderNeeded() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProviderConsumersCoveredByPredicate enforces the invariant that ties
+// spiffeProviderNeeded to plugins.BuildWithSPIFFE: the predicate detects a
+// plugin's need via identity.type=spiffe, which covers token-exchange — the
+// only spiffe.ProviderConsumer today. If a new ProviderConsumer is registered,
+// this fails so the author confirms spiffeProviderNeeded detects its need;
+// otherwise that plugin would silently receive a nil Provider on a SPIRE-less
+// cluster. The main package blank-imports every plugin, so the registry here is
+// the full production set.
+func TestProviderConsumersCoveredByPredicate(t *testing.T) {
+	// Plugins whose SPIFFE need spiffeProviderNeeded is known to detect.
+	covered := map[string]bool{"token-exchange": true}
+	for _, name := range plugins.SPIFFEConsumerPlugins() {
+		if !covered[name] {
+			t.Errorf("plugin %q implements spiffe.ProviderConsumer but is not covered by "+
+				"spiffeProviderNeeded; make it signal its need via identity.type=spiffe (or "+
+				"extend the predicate), then add %q to this set", name, name)
+		}
 	}
 }

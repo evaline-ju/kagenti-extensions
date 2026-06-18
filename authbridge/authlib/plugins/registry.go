@@ -80,6 +80,25 @@ func RegisteredPlugins() []string {
 	return names
 }
 
+// SPIFFEConsumerPlugins returns the sorted names of registered plugins whose
+// instances implement spiffe.ProviderConsumer — i.e. the plugins BuildWithSPIFFE
+// would inject the Provider into. Callers that gate Provider construction on
+// actual need (see cmd/authbridge-proxy's spiffeProviderNeeded) use this to
+// assert their need-detection covers every consumer; a new consumer that slips
+// past the predicate would otherwise silently receive a nil Provider.
+func SPIFFEConsumerPlugins() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	var names []string
+	for name, factory := range registry {
+		if _, ok := factory().(spiffe.ProviderConsumer); ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // CatalogEntry pairs a registered plugin's name with the capabilities
 // it advertises and the field-level schema of its config (if it
 // implements pipeline.SchemaProvider). Surfaces in `abctl`'s catalog
