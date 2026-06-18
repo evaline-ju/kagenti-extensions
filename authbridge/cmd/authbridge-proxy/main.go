@@ -34,6 +34,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/tlsbridge"
 
 	// Only HTTP listeners are compiled in: no extproc/extauthz
 	// (no gRPC, no envoy types).
@@ -247,6 +248,49 @@ func main() {
 		slog.Info("mTLS disabled (no mtls block in config)")
 	}
 
+	// TLS bridge: when enabled, the forward proxy terminates agent outbound
+	// TLS (MITM) so the outbound pipeline sees decrypted HTTPS. Constructed
+	// here and set on fpSrv below (mirroring fpSrv.SkipHosts / fpSrv.Shared).
+	// A nil *Engine leaves today's blind-tunnel behavior intact.
+	var bridge *tlsbridge.Engine
+	if cfg.TLSBridge != nil && cfg.TLSBridge.Enabled {
+		var src tlsbridge.CASource
+		if cfg.TLSBridge.CASource == "file" {
+			src, err = tlsbridge.NewFileSource(cfg.TLSBridge.CACertPath, cfg.TLSBridge.CAKeyPath)
+		} else {
+			src, err = tlsbridge.NewEphemeralSource()
+		}
+		if err != nil {
+			log.Fatalf("tls-bridge CA init failed: %v", err)
+		}
+		var extra []byte
+		if cfg.TLSBridge.UpstreamCABundle != "" {
+			if extra, err = os.ReadFile(cfg.TLSBridge.UpstreamCABundle); err != nil {
+				log.Fatalf("tls-bridge upstream_ca_bundle read failed: %v", err)
+			}
+		}
+		up, uerr := tlsbridge.NewUpstreamClient(extra)
+		if uerr != nil {
+			log.Fatalf("tls-bridge upstream client failed: %v", uerr)
+		}
+		minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
+		scope := tlsbridge.ScopeExternal
+		if cfg.TLSBridge.Scope == "all" {
+			scope = tlsbridge.ScopeAll
+		}
+		bridge = &tlsbridge.Engine{
+			Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
+				Scope: scope, InternalCIDRs: cfg.TLSBridge.InternalCIDRs, SkipHosts: cfg.TLSBridge.SkipHosts,
+			}),
+			Term:     tlsbridge.NewTerminator(minter),
+			Skip:     tlsbridge.NewSkipSet(),
+			Upstream: up,
+			CAPEM:    src.CACertPEM(),
+		}
+		tlsbridge.RunTrustSelfCheck(bridge.CAPEM)
+		slog.Info("tls-bridge enabled", "scope", cfg.TLSBridge.Scope, "ca_source", cfg.TLSBridge.CASource)
+	}
+
 	// Proxy-sidecar: reverse proxy on the inbound path + forward proxy
 	// on the outbound path.
 	rpSrv, err := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
@@ -266,6 +310,7 @@ func main() {
 		log.Fatalf("listener.skip_hosts: %v", err)
 	}
 	fpSrv.SkipHosts = skipHosts
+	fpSrv.TLSBridge = bridge
 	sharedStore := shared.New()
 	defer sharedStore.Close() // stop the TTL janitor on normal main return
 	rpSrv.Shared = sharedStore

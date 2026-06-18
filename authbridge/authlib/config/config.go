@@ -37,6 +37,33 @@ type Config struct {
 	// = today's spiffe-helper-driven behavior (until the chart/operator
 	// follow-ups land and start populating the block).
 	SPIFFE *SPIFFEConfig `yaml:"spiffe,omitempty" json:"spiffe,omitempty"`
+	// TLSBridge, when non-nil and Enabled, terminates agent outbound TLS so the
+	// outbound pipeline sees decrypted HTTPS. See docs/.../tlsbridge-design.md.
+	TLSBridge *TLSBridgeConfig `yaml:"tls_bridge,omitempty" json:"tls_bridge,omitempty"`
+}
+
+// TLSBridgeConfig configures the outbound TLS bridge (MITM termination of
+// agent egress so the outbound plugin pipeline sees decrypted HTTPS).
+type TLSBridgeConfig struct {
+	Enabled          bool     `yaml:"enabled" json:"enabled"`
+	Scope            string   `yaml:"scope" json:"scope"` // external | all
+	InternalCIDRs    []string `yaml:"internal_cidrs" json:"internal_cidrs"`
+	CASource         string   `yaml:"ca_source" json:"ca_source"` // file | ephemeral
+	CACertPath       string   `yaml:"ca_cert_path" json:"ca_cert_path"`
+	CAKeyPath        string   `yaml:"ca_key_path" json:"ca_key_path"`
+	UpstreamCABundle string   `yaml:"upstream_ca_bundle" json:"upstream_ca_bundle"`
+	SkipHosts        []string `yaml:"skip_hosts" json:"skip_hosts"`
+}
+
+// Validate is called from the loader when TLSBridge != nil.
+func (b *TLSBridgeConfig) Validate() error {
+	if b.Scope != "" && b.Scope != "external" && b.Scope != "all" {
+		return fmt.Errorf("tls_bridge.scope must be 'external' or 'all', got %q", b.Scope)
+	}
+	if b.CASource == "file" && (b.CACertPath == "" || b.CAKeyPath == "") {
+		return fmt.Errorf("tls_bridge.ca_source=file requires ca_cert_path and ca_key_path")
+	}
+	return nil
 }
 
 // MTLSMode names the inbound + outbound TLS posture. Vocabulary
@@ -459,6 +486,12 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.SPIFFE.Validate(); err != nil {
 		return nil, err
+	}
+
+	if cfg.TLSBridge != nil {
+		if err := cfg.TLSBridge.Validate(); err != nil {
+			return nil, err
+		}
 	}
 
 	return &cfg, nil

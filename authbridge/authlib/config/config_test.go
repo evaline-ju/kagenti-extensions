@@ -727,6 +727,29 @@ spiffe: {}
 	}
 }
 
+// --- TLS bridge config ---
+
+// The tls_bridge block decodes into TLSBridgeConfig and Load surfaces it.
+func TestConfig_TLSBridgeBlockDecodes(t *testing.T) {
+	y := []byte("mode: proxy-sidecar\n" +
+		"tls_bridge:\n" +
+		"  enabled: true\n" +
+		"  scope: external\n" +
+		"  ca_source: ephemeral\n" +
+		"  skip_hosts: [\"pinned.example.com\"]\n")
+	p := filepath.Join(t.TempDir(), "cfg.yaml")
+	if err := os.WriteFile(p, y, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.TLSBridge == nil || !cfg.TLSBridge.Enabled || cfg.TLSBridge.Scope != "external" {
+		t.Fatalf("tls_bridge block did not decode: %+v", cfg.TLSBridge)
+	}
+}
+
 // Absent mtls block leaves cfg.MTLS nil — today's behavior, no TLS.
 func TestLoad_MTLS_AbsentBlock(t *testing.T) {
 	dir := t.TempDir()
