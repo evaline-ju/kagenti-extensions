@@ -685,6 +685,28 @@ func TestComputeSpanGlyphs(t *testing.T) {
 				outer(glyphEnd),
 			},
 		},
+		{
+			// The #52 case: a pair (2,3) nested THREE deep — inside a middle
+			// span (1,4) inside an outer span (0,5). The innermost pair's
+			// endpoints must still show their ┌/└ corners (so its req/resp
+			// connect) rather than the middle span's bar masking them. inner =
+			// the row's narrowest containing span, not the second-widest.
+			name: "triple-nested innermost pair keeps its corners",
+			pairs: map[int]int{
+				0: 5, 5: 0,
+				1: 4, 4: 1,
+				2: 3, 3: 2,
+			},
+			n: 6,
+			want: []spanLevels{
+				outer(glyphStart),             // 0: outer starts
+				both(glyphMiddle, glyphStart), // 1: outer mid, middle-span starts
+				both(glyphMiddle, glyphStart), // 2: outer mid, innermost STARTS (was masked to middle)
+				both(glyphMiddle, glyphEnd),   // 3: outer mid, innermost ENDS (was masked to middle)
+				both(glyphMiddle, glyphEnd),   // 4: outer mid, middle-span ends
+				outer(glyphEnd),               // 5: outer ends
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

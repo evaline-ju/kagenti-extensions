@@ -615,15 +615,24 @@ func computeSpanGlyphs(pairs map[int]int, n int) []spanLevels {
 		if len(participating) == 0 {
 			continue
 		}
-		// Sort by width descending — outer (widest) first, then inner. Stable
-		// so equal-width spans keep declaration order (deterministic tests).
+		// Sort by width descending — widest first, narrowest last. Stable so
+		// equal-width spans keep declaration order (deterministic tests).
 		sort.SliceStable(participating, func(p, q int) bool {
 			return (participating[p].b - participating[p].a) >
 				(participating[q].b - participating[q].a)
 		})
+		// outer = the widest containing span (the broadest context). inner =
+		// the NARROWEST containing span — the row's own tightest exchange —
+		// NOT the second-widest. A row that is an endpoint of a deeply-nested
+		// pair must still show its ┌/└ corner so its request and response
+		// connect visually; picking the second-widest would let an
+		// intermediate enclosing span's middle bar mask it. Example: a
+		// tools/list pair nested inside both an a2a message/stream span and a
+		// long-lived $transport/stream span would otherwise render "││" on
+		// both rows instead of "│┌" / "│└".
 		out[i].outer = glyphAt(participating[0], i)
 		if len(participating) > 1 {
-			out[i].inner = glyphAt(participating[1], i)
+			out[i].inner = glyphAt(participating[len(participating)-1], i)
 		}
 	}
 	return out
