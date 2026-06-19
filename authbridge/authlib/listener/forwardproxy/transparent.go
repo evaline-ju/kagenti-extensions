@@ -179,6 +179,9 @@ func (s *Server) recordTunnelOpened(pctx *pipeline.Context) {
 		Plugins:     plugins,
 		Identity:    pipeline.SnapshotIdentity(pctx),
 		Host:        pctx.Host,
+		// Explicit opaque-tunnel marker so abctl can fold this CONNECT into
+		// the decrypted inner request without inferring "tunnel" from shape.
+		Tunnel: true,
 	}
 	// Always record the tunnel-open so passthrough/non-bridged tunnels (no
 	// plugin activity) are still visible. For a TLS-bridged call abctl folds

@@ -456,7 +456,7 @@ func (m *model) helpView() string {
 		}
 		return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [q] quit"
 	case paneEvents:
-		skipHint := "[s] hide skips"
+		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {
 			skipHint = "[s] show all"
 		}

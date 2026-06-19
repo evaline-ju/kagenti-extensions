@@ -326,6 +326,7 @@ func TestBuildEventRows_CollapsesBridgedConnect(t *testing.T) {
 			Direction: pipeline.Outbound,
 			Phase:     pipeline.SessionRequest,
 			Host:      "api.anthropic.com:443",
+			Tunnel:    true,
 			Invocations: &pipeline.Invocations{
 				Outbound: []pipeline.Invocation{{Plugin: "jwt-validation", Action: pipeline.ActionSkip}},
 			},
@@ -380,7 +381,7 @@ func TestBuildEventRows_CollapsesBridgedConnect(t *testing.T) {
 // by a different-host request (host-mismatch guard).
 func TestBuildEventRows_PassthroughTunnelStandsAlone(t *testing.T) {
 	connect := func(host string) pipeline.SessionEvent {
-		return pipeline.SessionEvent{Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: host}
+		return pipeline.SessionEvent{Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: host, Tunnel: true}
 	}
 	cases := []struct {
 		name   string
@@ -429,7 +430,7 @@ func TestBuildEventRows_TunnelInvocationsFoldIntoRow(t *testing.T) {
 	events := []pipeline.SessionEvent{
 		// CONNECT tunnel-open — an egress gate explicitly ALLOWED it.
 		{
-			Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: "api.example.com:443",
+			Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: "api.example.com:443", Tunnel: true,
 			Invocations: &pipeline.Invocations{Outbound: []pipeline.Invocation{
 				{Plugin: "egress-policy", Action: pipeline.ActionAllow},
 			}},
@@ -642,20 +643,14 @@ func TestStatusCell(t *testing.T) {
 // TestHostOnly covers port stripping (used by collapse + pairing), including
 // the no-port and IPv6 cases.
 func TestHostOnly(t *testing.T) {
-	cases := []struct {
-		in, want string
-		port     bool
-	}{
-		{"example.com:443", "example.com", true},
-		{"example.com", "example.com", false},
-		{"[::1]:8443", "::1", true},
+	cases := []struct{ in, want string }{
+		{"example.com:443", "example.com"},
+		{"example.com", "example.com"},
+		{"[::1]:8443", "::1"},
 	}
 	for _, tc := range cases {
 		if got := hostOnly(tc.in); got != tc.want {
 			t.Errorf("hostOnly(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-		if got := hasPort(tc.in); got != tc.port {
-			t.Errorf("hasPort(%q) = %v, want %v", tc.in, got, tc.port)
 		}
 	}
 }

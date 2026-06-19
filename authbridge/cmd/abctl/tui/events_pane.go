@@ -206,14 +206,11 @@ func buildEventRows(events []pipeline.SessionEvent) []eventRow {
 }
 
 // isTunnelOpen reports whether e is a CONNECT / transparent-redirect
-// tunnel-open: an outbound request event with no protocol extension (the
-// bytes are opaque) whose host carries an explicit port. recordTunnelOpened
-// is the only producer of such events.
+// tunnel-open. It keys on the explicit Tunnel marker the producer
+// (recordTunnelOpened) sets — NOT on host/extension shape, which an ordinary
+// unparsed outbound request could mimic and get wrongly folded.
 func isTunnelOpen(e *pipeline.SessionEvent) bool {
-	return e.Direction == pipeline.Outbound &&
-		e.Phase == pipeline.SessionRequest &&
-		e.A2A == nil && e.MCP == nil && e.Inference == nil &&
-		hasPort(e.Host)
+	return e.Tunnel
 }
 
 // isBridgedInner reports whether inner is the decrypted request the TLS bridge
@@ -226,12 +223,9 @@ func isTunnelOpen(e *pipeline.SessionEvent) bool {
 // Two guards keep unrelated events from folding:
 //   - inner must be another outbound REQUEST, never a response, so a plain
 //     request→response exchange isn't mistaken for a bridged pair.
-//   - inner must NOT itself be a tunnel-open. Two back-to-back passthrough
-//     CONNECTs to the same host (common with connection pooling) would
-//     otherwise fold — hiding one real message and mislabeling the other. A
-//     genuine decrypted inner request is not opaque-with-a-port, so this only
-//     excludes the rare non-standard-port bridge whose inner had no parser
-//     match (still shown, just as its own row rather than folded).
+//   - inner must NOT itself be a tunnel-open (Tunnel marker). Two back-to-back
+//     passthrough CONNECTs to the same host (common with connection pooling)
+//     would otherwise fold — hiding one real message and mislabeling the other.
 func isBridgedInner(tunnel, inner *pipeline.SessionEvent) bool {
 	host := hostOnly(inner.Host)
 	return inner.Direction == pipeline.Outbound &&
@@ -248,12 +242,6 @@ func hostOnly(hostport string) string {
 		return h
 	}
 	return hostport
-}
-
-// hasPort reports whether hostport parses as "host:port".
-func hasPort(hostport string) bool {
-	_, _, err := net.SplitHostPort(hostport)
-	return err == nil
 }
 
 // allInvocations returns every plugin invocation on an event, both
@@ -414,16 +402,26 @@ func shortPhase(p pipeline.SessionPhase) string {
 	return "?"
 }
 
-func eventMethod(e pipeline.SessionEvent) string {
+// eventMethodValue is the raw, untruncated method/model for an event — the A2A
+// method, inference model, or MCP method. Used for logic (pairing, filtering)
+// where truncation would conflate distinct names sharing a 22-char prefix or
+// hide searchable suffixes.
+func eventMethodValue(e pipeline.SessionEvent) string {
 	switch {
 	case e.A2A != nil:
-		return truncStr(e.A2A.Method, 22)
+		return e.A2A.Method
 	case e.Inference != nil:
-		return truncStr(e.Inference.Model, 22)
+		return e.Inference.Model
 	case e.MCP != nil:
-		return truncStr(e.MCP.Method, 22)
+		return e.MCP.Method
 	}
 	return ""
+}
+
+// eventMethod is the display form of the method/model — truncated to the
+// METHOD column width. Render-only; never compare or search on it.
+func eventMethod(e pipeline.SessionEvent) string {
+	return truncStr(eventMethodValue(e), 22)
 }
 
 func statusCell(e pipeline.SessionEvent) string {
@@ -504,7 +502,7 @@ func computeEventPairs(rows []eventRow) (map[*pipeline.SessionEvent]int, map[int
 			}
 			if ri.Direction != rj.Direction ||
 				hostOnly(ri.Host) != hostOnly(rj.Host) ||
-				eventMethod(*ri) != eventMethod(*rj) {
+				eventMethodValue(*ri) != eventMethodValue(*rj) {
 				continue
 			}
 			partner[i] = j
@@ -697,7 +695,7 @@ func eventMatchesDeny(e *pipeline.SessionEvent) bool {
 // caller identity, and protocol-specific content (A2A parts, MCP error, the
 // inference completion / finish reason).
 func eventHaystack(e *pipeline.SessionEvent) []string {
-	hay := []string{e.Host, eventMethod(*e)}
+	hay := []string{e.Host, eventMethodValue(*e)}
 	for _, iv := range allInvocations(e) {
 		hay = append(hay, iv.Plugin, string(iv.Action), iv.Reason, iv.Path)
 		// Plugin-specific diagnostic context — iterate keys + values so
