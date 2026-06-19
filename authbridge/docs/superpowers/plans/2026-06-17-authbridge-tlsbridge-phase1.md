@@ -40,7 +40,7 @@
 - `authlib/tlsbridge/upstream.go` — `NewUpstreamClient` (system + injected roots).
 - `authlib/tlsbridge/terminator.go` — `Terminator` (tls.Server wrap, ALPN h2+http/1.1).
 - `authlib/tlsbridge/serve.go` — `ServeConn` (one-conn keep-alive http.Server, h2-enabled).
-- `authlib/tlsbridge/engine.go` — `Engine` facade + `RunTrustSelfCheck`.
+- `authlib/tlsbridge/engine.go` — `Engine` facade + `RunTrustSelfCheck`. **(Historical: `RunTrustSelfCheck` was removed in #523 — it inspected the sidecar's own trust env, but the operator sets that on the agent container, so it false-WARNed on every deployment.)**
 - `authlib/tlsbridge/*_test.go` — per-unit tests.
 
 **Modified (proxy integration):**
@@ -1405,7 +1405,7 @@ Hook it into the loader beside the existing `MTLS`/`SPIFFE` validation (`config.
 
 Run: `go test ./config/ -run TestConfig_TLSBridge -v`
 
-- [ ] **Step 5: Add `RunTrustSelfCheck` to `engine.go`**
+- [ ] **Step 5: Add `RunTrustSelfCheck` to `engine.go`** — _(removed in #523; an in-process check can't see the agent container's trust store, so it false-WARNed on every operator deployment)_
 
 ```go
 import (
