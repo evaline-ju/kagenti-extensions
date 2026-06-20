@@ -54,10 +54,14 @@ This script supports two modes:
     are intentionally left alone.
 
     Usage:
-        python setup_keycloak.py -rbac config_file.yaml [--reset-only]
+        python setup_keycloak.py -rbac config_file.yaml [-policy policy.yaml] [--reset-only]
 
     Arguments:
         -rbac config_file.yaml    Path to main configuration YAML file
+        -policy policy.yaml       Path to access control policy YAML file (optional).
+                                  Makes realm roles composites of the client roles
+                                  declared in the policy, implementing RBAC through
+                                  OAuth2 token scopes.
 
     Flags:
         --reset-only        Run the cleanup pass (initialize_realm_state) and exit
@@ -69,6 +73,7 @@ This script supports two modes:
     Configuration files: (assumed to be under 'aiac' directory relative to script dir)
         .env           - Keycloak connection settings and realm name
         config.yaml    - Main configuration (clients, roles, users, scope_to_client)
+        policy.yaml    - Access control policy (realm role -> client role mappings)
 
 Security Note:
 - This script uses default Keycloak admin credentials (username: "admin", password: "admin")
@@ -81,7 +86,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from dotenv import load_dotenv
@@ -1286,11 +1291,106 @@ def _format_user_summary(
 
 
 # ---------------------------------------------------------------------------
+# 13. Access control policy
+# ---------------------------------------------------------------------------
+
+
+def load_access_control_policy(access_control_policy_file: Path) -> Dict[str, List[Dict[str, str]]]:
+    """Load access control policy (user role -> client roles).
+
+    Returns a dictionary where each user role (realm role) maps to a list of client role mappings.
+    Each mapping contains 'client' (client name) and 'role' (role name).
+    """
+    if not access_control_policy_file.exists():
+        raise FileNotFoundError(f"Access control policy file not found: {access_control_policy_file}")
+
+    with open(access_control_policy_file, "r") as f:
+        policy_config = yaml.safe_load(f)
+
+    policy = policy_config.get("policy", {})
+
+    if policy is None:
+        policy = {}
+
+    for user_role, client_roles in policy.items():
+        if not isinstance(client_roles, list):
+            raise ValueError(f"Invalid policy for user role '{user_role}': must be a list of client role mappings")
+        for client_role in client_roles:
+            if not isinstance(client_role, dict):
+                raise ValueError(
+                    f"Invalid client role mapping for user role '{user_role}':"
+                    + "must be a dict with 'client' and 'role' keys"
+                )
+            if "client" not in client_role or "role" not in client_role:
+                raise ValueError(
+                    f"Invalid client role mapping for user role '{user_role}':"
+                    + "must contain 'client' and 'role' keys"
+                )
+            if not isinstance(client_role["client"], str) or not isinstance(client_role["role"], str):
+                raise ValueError(
+                    f"Invalid client role mapping for user role '{user_role}':" + "'client' and 'role' must be strings"
+                )
+
+    return policy
+
+
+def _add_client_role_to_realm_role_composite(
+    admin: KeycloakAdmin, realm: str, realm_role_name: str, client_id: str, client_role_name: str
+) -> None:
+    """Add a client role to a realm role's composite roles."""
+    client_role = admin.get_client_role(client_id, client_role_name)
+    realm_role = admin.get_realm_role(realm_role_name)
+    url = f"{admin.connection.base_url}/admin/realms/{realm}/roles-by-id/{realm_role['id']}/composites"
+    admin.connection.raw_post(url, data=json.dumps([client_role]))
+
+
+def apply_access_control_policy(
+    admin: KeycloakAdmin,
+    realm: str,
+    access_control_policy_file: Path,
+    client_ids: Dict[str, str],
+    scope_ids: Optional[Dict[str, str]] = None,
+) -> None:
+    """Load and apply access control policy to realm roles.
+
+    Makes realm roles composites of client roles so users with a realm role
+    automatically get all the client roles mapped to that realm role in the policy.
+
+    Args:
+        admin: Keycloak admin instance
+        realm: Realm name
+        access_control_policy_file: Path to policy YAML file
+        client_ids: Mapping of client names to internal Keycloak IDs
+        scope_ids: Unused; kept for API compatibility
+    """
+    user_role_to_client_roles = load_access_control_policy(access_control_policy_file)
+
+    print("\n=== Making realm roles composites of client roles ===")
+    for user_role, client_role_mappings in user_role_to_client_roles.items():
+        print(f"\nProcessing realm role '{user_role}':")
+        for mapping in client_role_mappings:
+            client_name = mapping["client"]
+            role_name = mapping["role"]
+
+            if client_name not in client_ids:
+                print(f"  Warning: Client '{client_name}' not found")
+                continue
+
+            client_id = client_ids[client_name]
+
+            try:
+                _add_client_role_to_realm_role_composite(admin, realm, user_role, client_id, role_name)
+                print(f"  ✓ Added client role '{client_name}.{role_name}' to realm role '{user_role}'")
+            except Exception as e:
+                print(f"  ℹ Client role '{client_name}.{role_name}' already in composite or error: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
 
-def main_rbac(config_file: str, reset_only: bool = False):
+def main_rbac(config_file: str, policy_file: Optional[str] = None, reset_only: bool = False):
     """Main setup function."""
     script_dir = Path(__file__).parent
 
@@ -1345,6 +1445,13 @@ def main_rbac(config_file: str, reset_only: bool = False):
     # 8. Self scopes as DEFAULT
     assign_self_scopes_as_default(admin, client_ids, scope_ids)
 
+    # 8.5. Apply access control policy (if provided)
+    if policy_file:
+        policy_path = script_dir / "aiac" / policy_file
+        print(f"\nApplying access control policy from {policy_path} ...")
+        client_id_mapping = {name: info["id"] for name, info in client_ids.items()}
+        apply_access_control_policy(admin, realm, policy_path, client_id_mapping, scope_ids)
+
     # 9. Target scopes as OPTIONAL
     assign_target_scopes_as_optional(admin, main_config, client_ids, scope_ids)
 
@@ -1368,11 +1475,21 @@ if __name__ == "__main__":
         try:
             idx = sys.argv.index("-rbac")
             if idx + 1 >= len(sys.argv):
-                print("Usage: python setup_keycloak.py -rbac config.yaml [--reset-only]", file=sys.stderr)
+                print(
+                    "Usage: python setup_keycloak.py -rbac config.yaml [-policy policy.yaml] [--reset-only]",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             config_file = sys.argv[idx + 1]
+            policy_file = None
+            if "-policy" in sys.argv:
+                pidx = sys.argv.index("-policy")
+                if pidx + 1 >= len(sys.argv):
+                    print("Error: -policy requires a file argument", file=sys.stderr)
+                    sys.exit(1)
+                policy_file = sys.argv[pidx + 1]
             reset_only = "--reset-only" in sys.argv
-            main_rbac(config_file, reset_only=reset_only)
+            main_rbac(config_file, policy_file=policy_file, reset_only=reset_only)
         except Exception as e:
             import traceback
 
