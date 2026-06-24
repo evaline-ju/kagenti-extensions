@@ -119,7 +119,7 @@ into workload pods. Default deployment shape (proxy-sidecar mode):
 
 ## AuthBridge Binaries
 
-Three mode-specific binaries, one Dockerfile per binary:
+Two mode-specific binaries (proxy, envoy), one Dockerfile each; the `authbridge-lite` image is a build variant of the proxy binary (proxy Dockerfile + `exclude_plugin_*` tags):
 
 | Binary | Mode | Listeners | Plugins |
 |--------|------|-----------|---------|

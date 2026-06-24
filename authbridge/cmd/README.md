@@ -1,9 +1,11 @@
 # AuthBridge Binaries
 
-Three mode-specific authbridge binaries plus the `abctl` TUI. Each binary
-is hardcoded to a single deployment shape; the YAML `mode:` field must
-match the binary or boot fails. Mode is selected at build time by which
-binary you run, not at runtime via a flag.
+Two mode-specific authbridge binaries (proxy, envoy) plus the `abctl` TUI.
+Each binary is hardcoded to a single deployment shape; the YAML `mode:`
+field must match the binary or boot fails. Mode is selected at build time
+by which binary you run, not at runtime via a flag. The `authbridge-lite`
+image is a build variant of the proxy binary (proxy Dockerfile +
+`exclude_plugin_*` tags), not a separate binary.
 
 ## Binaries
 
@@ -23,7 +25,7 @@ variant — the Envoy proxy itself.
 
 ## Configuration
 
-All three binaries accept a single flag, `--config <path>`, pointing
+Both binaries accept a single flag, `--config <path>`, pointing
 at the YAML config file the operator mounts at
 `/etc/authbridge/config.yaml`. The config schema and per-plugin
 options are documented in

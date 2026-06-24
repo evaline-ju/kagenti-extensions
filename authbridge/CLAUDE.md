@@ -90,7 +90,7 @@ authbridge/
 
 ## Component Details
 
-### AuthBridge Binaries (cmd/authbridge-{proxy,envoy,lite}/)
+### AuthBridge Binaries (cmd/authbridge-{proxy,envoy}/)
 
 The mode-specific authbridge binaries handle both traffic directions. Auth logic
 and all listener implementations live in `authlib/` (under `authlib/listener/`);
@@ -496,9 +496,9 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 
 ## Code Conventions
 
-### Go (authlib, cmd/authbridge-{proxy,envoy,lite}, demo-app)
+### Go (authlib, cmd/authbridge-{proxy,envoy}, demo-app)
 - Go 1.25
-- Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy,lite}/` (mode-specific binaries that wire listeners + plugins together)
+- Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy}/` (mode-specific binaries that wire listeners + plugins together). The `authbridge-lite` image is the proxy binary built with `exclude_plugin_*` tags, not a separate module.
 - `authbridge/go.work` workspace links the modules for local development
 - Logging with `log/slog`; the binaries log under their own name (`authbridge-proxy`, `authbridge-envoy`). Note the `authbridge-lite` image runs the `authbridge-proxy` binary, so it logs as `authbridge-proxy`.
 - gRPC ext-proc using `envoyproxy/go-control-plane` types (in `authlib/listener/extproc`)
