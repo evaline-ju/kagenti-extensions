@@ -123,3 +123,38 @@ func TestMinter_LRUEvictsOldest(t *testing.T) {
 		t.Errorf("expected most-recent host \"c\" to still be cached")
 	}
 }
+
+// TestMinter_ReMintsWallClockExpiredLeaf is the regression guard for the
+// suspend/VM-pause bug: the cached leaf is expired by the wall clock, but the
+// process monotonic clock froze during suspend so the cache deadline still
+// reads as fresh. The minter must gate on the leaf's real NotAfter and
+// re-mint, never serve a leaf the client will reject as expired.
+func TestMinter_ReMintsWallClockExpiredLeaf(t *testing.T) {
+	m, _ := newTestMinter(t) // LeafTTL=time.Hour, so the cache deadline stays "fresh"
+	c1, err := m.GetCertificateForHost("h.example.com")
+	if err != nil {
+		t.Fatalf("first mint: %v", err)
+	}
+	// mint() must populate Leaf so the cache can gate on real validity.
+	m.mu.Lock()
+	e := m.items["h.example.com"].Value.(*cacheEntry)
+	if e.cert.Leaf == nil {
+		m.mu.Unlock()
+		t.Fatal("minted cert has no Leaf populated")
+	}
+	// Simulate the leaf having aged past its NotAfter while the monotonic cache
+	// deadline did not advance (host was suspended).
+	e.cert.Leaf.NotAfter = time.Now().Add(-time.Minute)
+	m.mu.Unlock()
+
+	c2, err := m.GetCertificateForHost("h.example.com")
+	if err != nil {
+		t.Fatalf("second mint: %v", err)
+	}
+	if &c1.Certificate[0][0] == &c2.Certificate[0][0] {
+		t.Fatal("served a wall-clock-expired cached leaf; expected a re-mint")
+	}
+	if c2.Leaf == nil || !time.Now().Before(c2.Leaf.NotAfter) {
+		t.Fatal("re-minted leaf is not valid")
+	}
+}
