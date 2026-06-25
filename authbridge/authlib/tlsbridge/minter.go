@@ -118,10 +118,10 @@ func (m *Minter) mint(host string) (*tls.Certificate, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
-		NotBefore: time.Now().Add(-time.Minute),
+		NotBefore:    time.Now().Add(-time.Minute),
 		// Leaf validity outlasts the cache deadline (now+ttl) by renewBefore so
 		// a cached leaf is always re-minted before it can serve past expiry.
-		NotAfter: time.Now().Add(m.ttl + renewBefore),
+		NotAfter:    time.Now().Add(m.ttl + renewBefore),
 		KeyUsage:    x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

@@ -124,11 +124,11 @@ func TestMinter_LRUEvictsOldest(t *testing.T) {
 	}
 }
 
-// TestMinter_ReMintsWallClockExpiredLeaf is the regression guard for the
-// suspend/VM-pause bug: the cached leaf is expired by the wall clock, but the
-// process monotonic clock froze during suspend so the cache deadline still
-// reads as fresh. The minter must gate on the leaf's real NotAfter and
-// re-mint, never serve a leaf the client will reject as expired.
+// TestMinter_ReMintsWallClockExpiredLeaf exercises the NotAfter backstop: if a
+// cached leaf is ever wall-clock-expired while the cache deadline still reads
+// fresh, Get must gate on the leaf's real NotAfter and re-mint rather than
+// serve a cert the client rejects. (The primary suspend fix — the wall-clock
+// cache deadline — is guarded by TestMinter_CacheDeadlineIsWallClock.)
 func TestMinter_ReMintsWallClockExpiredLeaf(t *testing.T) {
 	m, _ := newTestMinter(t) // LeafTTL=time.Hour, so the cache deadline stays "fresh"
 	c1, err := m.GetCertificateForHost("h.example.com")
@@ -156,5 +156,25 @@ func TestMinter_ReMintsWallClockExpiredLeaf(t *testing.T) {
 	}
 	if c2.Leaf == nil || !time.Now().Before(c2.Leaf.NotAfter) {
 		t.Fatal("re-minted leaf is not valid")
+	}
+}
+
+// TestMinter_CacheDeadlineIsWallClock guards the actual suspend fix: the cache
+// freshness deadline must carry NO monotonic clock reading, so the freshness
+// check falls back to the wall clock and expires correctly across a host
+// suspend (where the monotonic clock freezes but wall time advances). A
+// monotonic-carrying deadline is exactly what made the cache keep serving a
+// wall-clock-expired leaf. time.Time's == compares the monotonic reading too,
+// so a deadline that still carried one would not equal its .Round(0) form.
+func TestMinter_CacheDeadlineIsWallClock(t *testing.T) {
+	m, _ := newTestMinter(t)
+	if _, err := m.GetCertificateForHost("h.example.com"); err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	m.mu.Lock()
+	exp := m.items["h.example.com"].Value.(*cacheEntry).expires
+	m.mu.Unlock()
+	if exp != exp.Round(0) {
+		t.Errorf("cache deadline carries a monotonic clock reading; must be wall-clock (.Round(0)) to survive suspend")
 	}
 }
