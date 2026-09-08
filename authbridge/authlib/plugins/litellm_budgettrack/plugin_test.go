@@ -551,14 +551,31 @@ func TestEmitCost_HeaderPath(t *testing.T) {
 	if ev.CostUSD != 0.0025 {
 		t.Errorf("CostUSD = %v, want 0.0025", ev.CostUSD)
 	}
-	if ev.Source != "gateway-header" {
-		t.Errorf("Source = %q, want gateway-header", ev.Source)
+	if ev.Source != sourceGatewayHeader {
+		t.Errorf("Source = %q, want %s", ev.Source, sourceGatewayHeader)
 	}
 	if ev.DailyTotalUSD != 0.0025 {
 		t.Errorf("DailyTotalUSD = %v, want 0.0025", ev.DailyTotalUSD)
 	}
 	if ev.DailyMaxUSD != 5.00 {
 		t.Errorf("DailyMaxUSD = %v, want 5.00", ev.DailyMaxUSD)
+	}
+
+	// A second priced response on the same plugin must show
+	// DailyTotalUSD accumulating while CostUSD stays per-response.
+	// Without this a bug that emitted per-call cost as the daily
+	// total would pass every other assertion here.
+	pctx2 := &pipeline.Context{ResponseHeaders: http.Header{responseCostHeader: {"0.0025"}}}
+	p.OnResponse(context.Background(), pctx2)
+	ev2 := getCostEvent(t, pctx2)
+	if ev2 == nil {
+		t.Fatal("no costEvent emitted on second response")
+	}
+	if ev2.CostUSD != 0.0025 {
+		t.Errorf("second CostUSD = %v, want 0.0025 (per-response, not cumulative)", ev2.CostUSD)
+	}
+	if ev2.DailyTotalUSD != 0.0050 {
+		t.Errorf("second DailyTotalUSD = %v, want 0.0050 (accumulated across both responses)", ev2.DailyTotalUSD)
 	}
 }
 
@@ -577,12 +594,19 @@ func TestEmitCost_UsageFallback(t *testing.T) {
 	if ev == nil {
 		t.Fatal("no costEvent emitted")
 	}
-	if ev.Source != "usage-fallback" {
-		t.Errorf("Source = %q, want usage-fallback", ev.Source)
+	if ev.Source != sourceUsageFallback {
+		t.Errorf("Source = %q, want %s", ev.Source, sourceUsageFallback)
 	}
 	want := 100*1e-6 + 40*5e-6
 	if ev.CostUSD < want-1e-12 || ev.CostUSD > want+1e-12 {
 		t.Errorf("CostUSD = %v, want %v", ev.CostUSD, want)
+	}
+	// Daily fields populated on the streaming path too.
+	if ev.DailyTotalUSD < want-1e-12 || ev.DailyTotalUSD > want+1e-12 {
+		t.Errorf("DailyTotalUSD = %v, want %v (matches first-response cost)", ev.DailyTotalUSD, want)
+	}
+	if ev.DailyMaxUSD != 5.00 {
+		t.Errorf("DailyMaxUSD = %v, want 5.00", ev.DailyMaxUSD)
 	}
 }
 
