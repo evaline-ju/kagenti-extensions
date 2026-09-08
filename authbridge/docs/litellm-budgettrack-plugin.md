@@ -152,6 +152,25 @@ The spend file (`spend-authbridge.json`) is a simple JSON object:
 5. Write ledger to disk
 6. Continue pipeline
 
+## Observability
+
+Each priced response surfaces on the session-event stream at
+`SessionEvent.Plugins["litellm-budget-track"]`, so consumers can read
+per-response cost without duplicating the pricing math or reading the file
+ledger. Unpriced responses (missing header + no per-token rates configured, or a
+zero-cost cache hit) produce no event.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `cost_usd` | float64 | Cost of this single response, in dollars. |
+| `source` | string | `"gateway-header"` (authoritative — LiteLLM stamped the header) or `"usage-fallback"` (priced from token counters, used for streamed responses whose header always reports 0). |
+| `daily_total_usd` | float64 | Ledger total after this response was added. |
+| `daily_max_usd` | float64 | Configured daily cap (`max_budget`). |
+
+See [`plugin-reference.md#emitting-session-events`](./plugin-reference.md#emitting-session-events)
+for how the listener promotes `pctx.Extensions.Custom` entries to
+`SessionEvent.Plugins`.
+
 ## Build
 
 The plugin is included by default in `authbridge-proxy` builds. To exclude:
