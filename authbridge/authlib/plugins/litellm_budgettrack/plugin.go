@@ -83,6 +83,22 @@ func (c budgetTrackConfig) cacheReadRate() float64 {
 // streaming frames until the terminal frame prices it.
 const stateKey = "litellm-budget-track"
 
+// costEvent surfaces one priced response. Emitted per response when
+// cost > 0; consumers see it as SessionEvent.Plugins["litellm-budget-track"].
+type costEvent struct {
+	CostUSD float64 `json:"cost_usd"`
+
+	// Source is "gateway-header" (authoritative x-litellm-response-cost)
+	// or "usage-fallback" (priced from token counters, used for streamed
+	// responses whose header always reports 0).
+	Source string `json:"source"`
+
+	// DailyTotalUSD is the ledger total after this response was added.
+	// DailyMaxUSD is the configured cap.
+	DailyTotalUSD float64 `json:"daily_total_usd"`
+	DailyMaxUSD   float64 `json:"daily_max_usd"`
+}
+
 // usageState accumulates the largest token counts seen across a stream's
 // frames. Anthropic reports input_tokens in message_start and the cumulative
 // output_tokens in the final message_delta, so taking the max of each yields
@@ -178,7 +194,9 @@ func (p *BudgetTrack) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 // instead; this remains for listeners that only call OnResponse.
 func (p *BudgetTrack) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if cost, _ := headerCost(pctx); cost > 0 {
-		p.accumulate(cost)
+		if total, ok := p.accumulate(cost); ok {
+			p.emitCost(pctx, cost, "gateway-header", total)
+		}
 	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -228,6 +246,7 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	st.settled = true
 
 	cost, present := headerCost(pctx)
+	source := "gateway-header"
 	if cost <= 0 {
 		// Fall back to per-token pricing only when there is no authoritative
 		// header cost: the header is absent, or this is a streamed response
@@ -242,29 +261,49 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 				float64(st.cacheWriteTokens)*p.cfg.cacheWriteRate() +
 				float64(st.cacheReadTokens)*p.cfg.cacheReadRate() +
 				float64(st.outputTokens)*p.cfg.OutputCostPerToken
+			source = "usage-fallback"
 		}
 	}
 	if cost > 0 {
-		p.accumulate(cost)
+		if total, ok := p.accumulate(cost); ok {
+			p.emitCost(pctx, cost, source, total)
+		}
 	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// accumulate adds one priced call to today's ledger and persists it. A
-// non-finite or non-positive cost is ignored: NaN/±Inf would poison
-// TotalSpend (making the budget check meaningless) and break the JSON
-// marshal, so this is the single chokepoint that guarantees the ledger
-// only ever holds finite money.
-func (p *BudgetTrack) accumulate(cost float64) {
+// accumulate adds one priced call to today's ledger and persists it,
+// returning the post-add TotalSpend and whether the cost was recorded.
+// A non-finite or non-positive cost is ignored (added=false): NaN/±Inf
+// would poison TotalSpend (making the budget check meaningless) and
+// break the JSON marshal, so this is the single chokepoint that
+// guarantees the ledger only ever holds finite money.
+func (p *BudgetTrack) accumulate(cost float64) (dailyTotal float64, added bool) {
 	if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
-		return
+		return 0, false
 	}
 	p.mu.Lock()
 	p.resetIfNewDay()
 	p.ledger.TotalSpend += cost
 	p.ledger.TotalCalls++
+	total := p.ledger.TotalSpend
 	p.saveLedger()
 	p.mu.Unlock()
+	return total, true
+}
+
+// emitCost writes the costEvent to pctx.Extensions.Custom; the listener
+// forwards it to SessionEvent.Plugins under the plugin name.
+func (p *BudgetTrack) emitCost(pctx *pipeline.Context, cost float64, source string, dailyTotal float64) {
+	if pctx.Extensions.Custom == nil {
+		pctx.Extensions.Custom = map[string]any{}
+	}
+	pctx.Extensions.Custom[p.Name()+pipeline.PluginEventSuffix] = costEvent{
+		CostUSD:       cost,
+		Source:        source,
+		DailyTotalUSD: dailyTotal,
+		DailyMaxUSD:   p.cfg.MaxBudget,
+	}
 }
 
 // headerCost returns the usable positive cost reported in the response headers

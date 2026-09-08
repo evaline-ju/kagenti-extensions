@@ -521,3 +521,90 @@ func TestZeroCostHeaderStreamedPricesFromUsage(t *testing.T) {
 		t.Errorf("streamed zero-header call not priced from usage: got %v want %v", got, want)
 	}
 }
+
+// getCostEvent pulls the emitted costEvent out of pctx.Extensions.Custom
+// under the same key the listener would read. Nil when nothing was emitted.
+func getCostEvent(t *testing.T, pctx *pipeline.Context) *costEvent {
+	t.Helper()
+	if pctx.Extensions.Custom == nil {
+		return nil
+	}
+	v, ok := pctx.Extensions.Custom["litellm-budget-track"+pipeline.PluginEventSuffix].(costEvent)
+	if !ok {
+		return nil
+	}
+	return &v
+}
+
+// TestEmitCost_HeaderPath: OnResponse (buffered) prices from the header
+// and emits a costEvent tagged gateway-header, with DailyTotalUSD matching
+// the ledger's post-add state and DailyMaxUSD from config.
+func TestEmitCost_HeaderPath(t *testing.T) {
+	p := configure(t, 5.00)
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{responseCostHeader: {"0.0025"}}}
+	p.OnResponse(context.Background(), pctx)
+
+	ev := getCostEvent(t, pctx)
+	if ev == nil {
+		t.Fatal("no costEvent emitted")
+	}
+	if ev.CostUSD != 0.0025 {
+		t.Errorf("CostUSD = %v, want 0.0025", ev.CostUSD)
+	}
+	if ev.Source != "gateway-header" {
+		t.Errorf("Source = %q, want gateway-header", ev.Source)
+	}
+	if ev.DailyTotalUSD != 0.0025 {
+		t.Errorf("DailyTotalUSD = %v, want 0.0025", ev.DailyTotalUSD)
+	}
+	if ev.DailyMaxUSD != 5.00 {
+		t.Errorf("DailyMaxUSD = %v, want 5.00", ev.DailyMaxUSD)
+	}
+}
+
+// TestEmitCost_UsageFallback: streamed responses (0-cost header) get priced
+// from the token counters and the emitted event names the fallback source.
+func TestEmitCost_UsageFallback(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6)
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{
+		responseCostHeader: {"0"},
+		"Content-Type":     {"text/event-stream; charset=utf-8"},
+	}}
+	p.OnResponseFrame(context.Background(), pctx, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":40}}}`), false)
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ev := getCostEvent(t, pctx)
+	if ev == nil {
+		t.Fatal("no costEvent emitted")
+	}
+	if ev.Source != "usage-fallback" {
+		t.Errorf("Source = %q, want usage-fallback", ev.Source)
+	}
+	want := 100*1e-6 + 40*5e-6
+	if ev.CostUSD < want-1e-12 || ev.CostUSD > want+1e-12 {
+		t.Errorf("CostUSD = %v, want %v", ev.CostUSD, want)
+	}
+}
+
+// TestEmitCost_NoEmitWhenUnpriced: an OnResponse call whose header is missing
+// or invalid must NOT emit a cost event (matches the ledger-untouched
+// invariant asserted by TestOnResponseIgnoresMissingOrInvalid).
+func TestEmitCost_NoEmitWhenUnpriced(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers http.Header
+	}{
+		{"missing", http.Header{}},
+		{"zero", http.Header{responseCostHeader: {"0"}}},
+		{"unparseable", http.Header{responseCostHeader: {"abc"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := configure(t, 5.00)
+			pctx := &pipeline.Context{ResponseHeaders: tc.headers}
+			p.OnResponse(context.Background(), pctx)
+			if ev := getCostEvent(t, pctx); ev != nil {
+				t.Errorf("costEvent emitted on unpriced response: %+v", *ev)
+			}
+		})
+	}
+}
