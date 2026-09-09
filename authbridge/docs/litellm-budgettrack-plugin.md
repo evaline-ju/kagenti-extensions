@@ -171,6 +171,18 @@ See [`plugin-reference.md#emitting-session-events`](./plugin-reference.md#emitti
 for how the listener promotes `pctx.Extensions.Custom` entries to
 `SessionEvent.Plugins`.
 
+### Deny events
+
+`OnRequest` rejects with HTTP 429 once the daily budget is exhausted,
+and surfaces the denial as a `phase: "denied"` session event carrying
+an `Invocation` with these `details`:
+
+| Key | Meaning |
+|-----|---------|
+| `daily_total_usd` | Ledger total at denial; same quantity as the cost event's `daily_total_usd`, formatted like the 429 wire body. |
+| `daily_max_usd` | Configured daily cap (`max_budget`). |
+| `total_calls` | Ledger call count at denial. |
+
 ## Build
 
 The plugin is included by default in `authbridge-proxy` builds. To exclude:

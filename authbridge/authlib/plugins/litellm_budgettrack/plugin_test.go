@@ -643,7 +643,12 @@ func TestOnRequestRecordsDenyInvocation(t *testing.T) {
 		ResponseHeaders: http.Header{responseCostHeader: {"0.002"}},
 	})
 
+	// Stamp Plugin+Phase like Pipeline.Run does — without it Record leaves
+	// Phase:"" and the listener's FilteredByPhase drops the invocation.
 	pctx := &pipeline.Context{}
+	pctx.SetCurrentPlugin("litellm-budget-track", pipeline.InvocationPhaseRequest)
+	defer pctx.ClearCurrentPlugin()
+
 	action := p.OnRequest(context.Background(), pctx)
 	if action.Type != pipeline.Reject {
 		t.Fatalf("OnRequest() over budget = %v, want Reject", action.Type)
@@ -657,6 +662,12 @@ func TestOnRequestRecordsDenyInvocation(t *testing.T) {
 		t.Fatalf("Inbound invocations = %d, want 1", len(inv))
 	}
 	got := inv[0]
+	if got.Plugin != "litellm-budget-track" {
+		t.Errorf("Plugin = %q, want litellm-budget-track", got.Plugin)
+	}
+	if got.Phase != pipeline.InvocationPhaseRequest {
+		t.Errorf("Phase = %q, want request (else listener FilteredByPhase drops it)", got.Phase)
+	}
 	if got.Action != pipeline.ActionDeny {
 		t.Errorf("Action = %q, want deny", got.Action)
 	}
@@ -664,12 +675,13 @@ func TestOnRequestRecordsDenyInvocation(t *testing.T) {
 		t.Errorf("Reason = %q, want budget.exceeded", got.Reason)
 	}
 	// Snapshot must match the ledger the plugin actually checked — not a
-	// stale zero from before the OnResponse above.
-	if got.Details["daily_spent_usd"] != "0.002" {
-		t.Errorf("Details[daily_spent_usd] = %q, want 0.002", got.Details["daily_spent_usd"])
+	// stale zero from before the OnResponse above. Values match the 429
+	// wire message's precision.
+	if got.Details["daily_total_usd"] != "0.0020" {
+		t.Errorf("Details[daily_total_usd] = %q, want 0.0020", got.Details["daily_total_usd"])
 	}
-	if got.Details["daily_max_usd"] != "0.001" {
-		t.Errorf("Details[daily_max_usd] = %q, want 0.001", got.Details["daily_max_usd"])
+	if got.Details["daily_max_usd"] != "0.00" {
+		t.Errorf("Details[daily_max_usd] = %q, want 0.00", got.Details["daily_max_usd"])
 	}
 	if got.Details["total_calls"] != "1" {
 		t.Errorf("Details[total_calls] = %q, want 1", got.Details["total_calls"])
@@ -681,6 +693,8 @@ func TestOnRequestRecordsDenyInvocation(t *testing.T) {
 func TestOnRequestUnderBudgetRecordsNothing(t *testing.T) {
 	p := configure(t, 5.00)
 	pctx := &pipeline.Context{}
+	pctx.SetCurrentPlugin("litellm-budget-track", pipeline.InvocationPhaseRequest)
+	defer pctx.ClearCurrentPlugin()
 	if action := p.OnRequest(context.Background(), pctx); action.Type != pipeline.Continue {
 		t.Fatalf("OnRequest() under budget = %v, want Continue", action.Type)
 	}

@@ -196,9 +196,10 @@ func (p *BudgetTrack) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 			Action: pipeline.ActionDeny,
 			Reason: "budget.exceeded",
 			Details: map[string]string{
-				// -1 precision: shortest exact representation.
-				"daily_spent_usd": strconv.FormatFloat(spend, 'f', -1, 64),
-				"daily_max_usd":   strconv.FormatFloat(p.cfg.MaxBudget, 'f', -1, 64),
+				// Key + precision mirror the 429 wire message and
+				// costEvent.DailyTotalUSD — one ledger, one name.
+				"daily_total_usd": strconv.FormatFloat(spend, 'f', 4, 64),
+				"daily_max_usd":   strconv.FormatFloat(p.cfg.MaxBudget, 'f', 2, 64),
 				"total_calls":     strconv.Itoa(calls),
 			},
 		})
