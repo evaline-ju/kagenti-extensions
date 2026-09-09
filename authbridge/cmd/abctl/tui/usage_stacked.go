@@ -79,22 +79,18 @@ func foldTailSeries(buckets []usage.Bucket, series []seriesKey, keep int) ([]ser
 		var acc usage.Counts
 		for label, c := range b.Series {
 			if tail[label] {
-				// Summed field-wise: usage.Counts.add is unexported, and every field
-				// must be carried or a folded band would under-report.
-				acc.Requests += c.Requests
-				acc.Errors += c.Errors
-				acc.Tokens += c.Tokens
-				acc.CostMicros += c.CostMicros
+				// usage.Counts.Add rather than summing the fields here: this used to
+				// be a field-by-field copy, which silently dropped PricedRequests
+				// when that field was added — under a comment asserting every field
+				// was carried. One summation, next to the struct, cannot drift.
+				acc.Add(c)
 				continue
 			}
 			merged[label] = c
 		}
 		if acc.Requests > 0 || acc.Tokens > 0 || acc.Errors > 0 {
 			cur := merged[tailLabel]
-			cur.Requests += acc.Requests
-			cur.Errors += acc.Errors
-			cur.Tokens += acc.Tokens
-			cur.CostMicros += acc.CostMicros
+			cur.Add(acc)
 			merged[tailLabel] = cur
 		}
 		out[i].Series = merged

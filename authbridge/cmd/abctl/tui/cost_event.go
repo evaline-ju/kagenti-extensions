@@ -1,56 +1,42 @@
 package tui
 
 import (
-	"encoding/json"
-
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
-// costEvent is the litellm-budget-track per-response event as published under
-// "litellm-budget-track". Mirrors the plugin's shape; a decode test guards the
-// tags.
+// costEvent is the litellm-budget-track per-response event.
 //
 // Unlike tool-prune's event, this one carries a finished dollar figure rather
 // than rates, so a consumer has no arithmetic left to do. It is NOT always an
 // authoritative figure though: the plugin prefers the cost LiteLLM stamps on the
 // response, but a streamed response always reports 0 there, so those are priced
 // from the plugin's own per-token rates instead. Source says which happened.
-type costEvent struct {
-	CostUSD float64 `json:"cost_usd"`
-	// Source is "gateway-header" (the gateway's own post-discount figure) or
-	// "usage-fallback" (priced from token counters by the plugin, used for
-	// streamed responses whose header reports 0 — for a streaming agent this is
-	// the common case, not the exception).
-	//
-	// Decoded but deliberately not rendered: the COST column shows modelled and
-	// gateway-stamped figures identically, matching the request-side cost, which
-	// is modelled too. Marking one and not the other would be the inconsistency.
-	Source string `json:"source"`
-	// DailyTotalUSD / DailyMaxUSD are decoded for wire coverage — nothing renders
-	// them yet. Kept so the decode test pins every field the plugin publishes,
-	// which is what makes a tag rename fail here rather than silently blank a
-	// column later.
-	DailyTotalUSD float64 `json:"daily_total_usd"`
-	DailyMaxUSD   float64 `json:"daily_max_usd"`
-}
+//
+// An ALIAS, not a copy: this is authlib's costevent.Event, so the compiler — not
+// a decode test — is what keeps abctl and the producer agreeing on the wire. This
+// file used to redeclare the struct and its decoder, which meant a field rename
+// in the plugin silently blanked a column here until a test happened to catch it.
+//
+// Source is "gateway-header" (the gateway's own post-discount figure) or
+// "usage-fallback" (priced from token counters by the plugin, used for streamed
+// responses whose header reports 0 — for a streaming agent this is the common
+// case, not the exception). It is decoded but deliberately not rendered: the COST
+// column shows modelled and gateway-stamped figures identically, matching the
+// request-side cost, which is modelled too. Marking one and not the other would be
+// the inconsistency. DailyTotalUSD / DailyMaxUSD are likewise carried but not yet
+// rendered.
+type costEvent = costevent.Event
 
 // decodeCostEvent pulls the litellm-budget-track event off a response event, if
 // present. Absent whenever the plugin is not in the pipeline, or the response
 // was not priced (a cache hit / error charges nothing and emits nothing) — so a
 // false return is the normal case, not an error.
+//
+// Kept as a local name because the TUI reads better for it; the logic, the
+// lookup key and the non-positive-cost rejection all live in authlib/costevent.
 func decodeCostEvent(e *pipeline.SessionEvent) (costEvent, bool) {
-	if e == nil || len(e.Plugins) == 0 {
-		return costEvent{}, false
-	}
-	raw, ok := e.Plugins["litellm-budget-track"]
-	if !ok {
-		return costEvent{}, false
-	}
-	var ce costEvent
-	if err := json.Unmarshal(raw, &ce); err != nil || ce.CostUSD <= 0 {
-		return costEvent{}, false
-	}
-	return ce, true
+	return costevent.Decode(e)
 }
 
 // promptCost models what the prompt of one request cost, from the response's

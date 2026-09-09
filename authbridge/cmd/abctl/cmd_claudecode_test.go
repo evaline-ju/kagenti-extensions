@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 )
 
 // settingsWithSecret is shaped like a real settings.json: unrelated top-level
@@ -380,15 +382,25 @@ func TestClaudeCodeEnable_SilentWhenCAPresent(t *testing.T) {
 	if code := claudeCodeEnable(settings, cfg, true, &out, &errb); code != 0 {
 		t.Fatalf("first pass: %s", errb.String())
 	}
-	caPath := readEnv(t, settings)[envCACerts]
+	envAfter := readEnv(t, settings)
+	caPath := envAfter[envCACerts]
 	if caPath == "" {
 		t.Fatal("no CA path was written")
 	}
 	if err := os.MkdirAll(filepath.Dir(caPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(caPath, []byte("-----BEGIN CERTIFICATE-----\n"), 0o600); err != nil {
-		t.Fatal(err)
+	// Both trust files must exist to silence the notes: ca.crt for Node, and the
+	// bundle for the tools whose CA variable replaces their trust store. They are
+	// written by different steps, so each gets its own note and each must be
+	// created here.
+	for _, p := range []string{caPath, envAfter[envSSLCert]} {
+		if p == "" {
+			t.Fatal("no trust path was written")
+		}
+		if err := os.WriteFile(p, []byte("-----BEGIN CERTIFICATE-----\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Re-run against a clean settings file, same config, now that the CA exists.
@@ -648,5 +660,163 @@ func TestWriteState_RefusesToOverwriteAnUnreadableRecord(t *testing.T) {
 	b, _ := os.ReadFile(path)
 	if string(b) != `{"settings":"` {
 		t.Errorf("the unreadable record was modified: %q", b)
+	}
+}
+
+// TestClaudeCodeEnable_ReplacingVarsGetTheBundleNotTheCA is the regression guard
+// for the bug this set of keys exists to fix. NODE_EXTRA_CA_CERTS EXTENDS Node's
+// trust store, so ca.crt is right for it. Every other CA variable REPLACES the
+// trust store, so ca.crt would leave that tool trusting one private CA and
+// nothing else — breaking all unproxied TLS. The failure is platform-split
+// (macOS keeps working via root_darwin.go, Linux and CI break), so a human is
+// unlikely to catch a regression here by running it locally.
+func TestClaudeCodeEnable_ReplacingVarsGetTheBundleNotTheCA(t *testing.T) {
+	settings, cfg := fixture(t, "{}")
+	var out, errb bytes.Buffer
+	if code := claudeCodeEnable(settings, cfg, true, &out, &errb); code != 0 {
+		t.Fatalf("enable: %s", errb.String())
+	}
+	env := readEnv(t, settings)
+
+	if got := filepath.Base(env[envCACerts]); got != "ca.crt" {
+		t.Errorf("%s = %q, want ca.crt (Node's setting is additive)", envCACerts, got)
+	}
+	for _, k := range bundleKeys {
+		got := env[k]
+		if got == "" {
+			t.Errorf("%s was not written", k)
+			continue
+		}
+		if filepath.Base(got) != tlsbridge.TrustBundleName {
+			t.Errorf("%s = %q, want %s — this variable replaces the trust store, so "+
+				"the bare CA would break every direct TLS call", k, got, tlsbridge.TrustBundleName)
+		}
+	}
+	// All four must agree; a split would trust different sets per tool.
+	for _, k := range bundleKeys[1:] {
+		if env[k] != env[bundleKeys[0]] {
+			t.Errorf("%s = %q disagrees with %s = %q", k, env[k], bundleKeys[0], env[bundleKeys[0]])
+		}
+	}
+}
+
+// TestClaudeCodeEnable_RefusesToClobberUserSSLCertFile: someone behind a
+// corporate CA already has SSL_CERT_FILE set. Replacing it would break their TLS
+// and give no clue why — the same property TestClaudeCodeEnable_
+// RefusesToClobberForeignProxy asserts for HTTPS_PROXY, now that the CA keys are
+// managed too.
+//
+// A foreign value can only ever reach the refusal, never the restore path, which
+// is why the round-trip below needs a cortex-shaped prior value instead.
+func TestClaudeCodeEnable_RefusesToClobberUserSSLCertFile(t *testing.T) {
+	settings, cfg := fixture(t, `{"env":{"SSL_CERT_FILE":"/corp/ca.pem"}}`)
+	var out, errb bytes.Buffer
+
+	if code := claudeCodeEnable(settings, cfg, true, &out, &errb); code == 0 {
+		t.Fatalf("enable overwrote a user-set %s; stdout:\n%s", envSSLCert, out.String())
+	}
+	if !strings.Contains(errb.String(), envSSLCert) {
+		t.Errorf("refusal did not name %s: %s", envSSLCert, errb.String())
+	}
+	if env := readEnv(t, settings); env[envSSLCert] != "/corp/ca.pem" {
+		t.Errorf("%s = %q, want the user's value untouched", envSSLCert, env[envSSLCert])
+	}
+}
+
+// TestClaudeCodeDisable_RestoresPriorCAValues is the restore path for the CA keys
+// this change added to managedKeys. Both the capture in enable and the loop in
+// disable iterate managedKeys, so the new keys come along for free — but nothing
+// pinned that, and the bookkeeping is where a partial addition would go wrong
+// silently: a key added to the write path but missed by the restore path deletes
+// something the user owned.
+//
+// Uses a cortex-SHAPED prior value (a stale bundle path under ~/.cortex), because
+// isCortexValue accepts it and enable proceeds to overwrite. A foreign value is
+// refused outright and never reaches the state file, so it cannot exercise this.
+func TestClaudeCodeDisable_RestoresPriorCAValues(t *testing.T) {
+	stale := filepath.Join("/somewhere", ".cortex", "ca", "old-bundle.crt")
+	settings, cfg := fixture(t, `{"env":{
+	  "SSL_CERT_FILE":"`+stale+`",
+	  "GIT_SSL_CAINFO":"`+stale+`",
+	  "ANTHROPIC_AUTH_TOKEN":"sk-x"
+	}}`)
+	state := filepath.Join(t.TempDir(), "claude-code-state.json")
+	var out, errb bytes.Buffer
+
+	if code := claudeCodeEnable2(settings, cfg, state, true, &out, &errb); code != 0 {
+		t.Fatalf("enable: %s", errb.String())
+	}
+	// Enable replaced them with the current bundle path.
+	if got := readEnv(t, settings)[envSSLCert]; got == stale {
+		t.Fatalf("%s was not updated, so the restore below proves nothing", envSSLCert)
+	}
+	if code := claudeCodeDisable2(settings, state, true, &out, &errb); code != 0 {
+		t.Fatalf("disable: %s", errb.String())
+	}
+
+	env := readEnv(t, settings)
+	for _, k := range []string{envSSLCert, envGitCA} {
+		if got := env[k]; got != stale {
+			t.Errorf("%s = %q, want the prior value %q restored", k, got, stale)
+		}
+	}
+	// Keys the user did NOT have are still removed rather than left behind.
+	for _, k := range []string{envRequestsCA, envCurlCA, envProxy, envCACerts} {
+		if _, ok := env[k]; ok {
+			t.Errorf("%s survived disable although we added it", k)
+		}
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "sk-x" {
+		t.Error("unrelated entry lost")
+	}
+}
+
+// TestDarwinGoNoteNamesTheKeychainRemedy: SSL_CERT_FILE is inert on macOS, so the
+// note is the only place a user learns that the Go tools need the keychain. If it
+// stops naming the command, the gap goes back to being silent.
+func TestDarwinGoNoteNamesTheKeychainRemedy(t *testing.T) {
+	note := darwinGoNote("/Users/x/.cortex/ca/ca.crt")
+	for _, want := range []string{
+		"security add-trusted-cert", "login.keychain-db",
+		"/Users/x/.cortex/ca/ca.crt", "inert",
+	} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note is missing %q:\n%s", want, note)
+		}
+	}
+	// It must not claim the other tools are broken — they are not.
+	if strings.Contains(note, "git, curl and Python are broken") {
+		t.Error("note overstates the scope")
+	}
+}
+
+// TestManualUninstallDocListsEveryManagedKey pins docs/laptop-service.md against
+// managedKeys.
+//
+// The doc's manual-uninstall fallback tells a user which keys to delete by hand. It
+// said "three" while managedKeys held seven, and four of the missing ones point at
+// bundle.crt — which the same procedure deletes a step earlier. Since those four
+// REPLACE their tool's trust store rather than extending it, following the doc left
+// git, curl and Python failing every TLS call. The count had already drifted once, so
+// it is pinned rather than trusted.
+func TestManualUninstallDocListsEveryManagedKey(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "laptop-service.md"))
+	if err != nil {
+		t.Fatalf("cannot read the laptop-service doc: %v", err)
+	}
+	body := string(doc)
+	for _, k := range managedKeys {
+		if !strings.Contains(body, k) {
+			t.Errorf("laptop-service.md does not mention %s; a user following the "+
+				"manual-uninstall steps would leave it behind", k)
+		}
+	}
+	// And it must not still claim a count, which is what went stale. Naming the
+	// number in prose invites exactly this drift.
+	for _, stale := range []string{"the three Cortex keys", "three keys"} {
+		if strings.Contains(body, stale) {
+			t.Errorf("laptop-service.md still says %q; managedKeys has %d entries",
+				stale, len(managedKeys))
+		}
 	}
 }

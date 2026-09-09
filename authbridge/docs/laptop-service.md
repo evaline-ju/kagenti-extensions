@@ -152,10 +152,66 @@ process within seconds, which looks like it refusing to die.
 abctl claude-code disable
 ```
 
-This removes only the three keys Cortex added to `~/.claude/settings.json`
-(`HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`)
-and leaves anything else in that file alone. Claude Code goes straight to the API
-again. Restart `claude` to pick it up.
+This removes only the keys Cortex added to `~/.claude/settings.json`
+(`HTTPS_PROXY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, and the CA variables
+`NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE` / `GIT_SSL_CAINFO` / `REQUESTS_CA_BUNDLE` /
+`CURL_CA_BUNDLE`) and leaves anything else in that file alone. Claude Code goes
+straight to the API again. Restart `claude` to pick it up.
+
+There are several CA variables because anything Claude Code spawns inherits
+`HTTPS_PROXY` and so must also be able to verify the bridge. They do not all get
+the same file: `NODE_EXTRA_CA_CERTS` **extends** Node's trust store, so it gets
+`ca.crt`, while the rest **replace** the trust store and get `bundle.crt` — the CA
+followed by this machine's public roots. Pointing a replacing variable at `ca.crt`
+would leave that tool trusting one private CA and nothing else, which breaks every
+direct TLS call it makes.
+
+### Developer tooling is not intercepted at all
+
+`gh`, `go`, `pip` and `npm` work out of the box, without trusting anything. The
+bridge ships a default `passthrough_hosts` list — GitHub, the Go module proxy and
+checksum DB, the package registries — and tunnels them rather than forging a leaf.
+
+That costs nothing. `inference-parser`, the MCP/A2A parsers and `tool-prune` all act
+on agent↔LLM and agent↔tool messages; none of them has anything to say about a
+module download. Intercepting those hosts produced no observability and broke every
+Go tool, which is the worst of both.
+
+To see the list, or to override it, set `tls_bridge.passthrough_hosts` in
+`~/.cortex/config.yaml`. An explicit list **replaces** the default rather than adding
+to it, and `passthrough_hosts: []` intercepts everything. Never list an inference
+endpoint there: it would silently remove the parsing and the token savings, with no
+error anywhere to notice it by.
+
+### Go tools on macOS need the keychain, not a variable
+
+`SSL_CERT_FILE` — the Go one, covering `go`, `gh` and `abctl` itself — **does
+nothing on macOS**. Go's `crypto/x509` honours it only in `root_unix.go`, which is
+built for `linux || freebsd || …` and excludes darwin; darwin's `loadSystemRoots`
+returns a sentinel that reads no files, and verification is then handed to
+Security.framework, which consults the keychain alone. No environment variable can
+change that.
+
+So on a Mac, when the bridge decrypts a host a Go tool is talking to, that tool
+fails with a bare `x509: certificate signed by unknown authority`. To cover them,
+trust the CA in your login keychain:
+
+```sh
+security add-trusted-cert -k ~/Library/Keychains/login.keychain-db \
+  -p ssl ~/.cortex/ca/ca.crt
+```
+
+Undo with:
+
+```sh
+security delete-certificate -c authbridge-tls-bridge-ca \
+  ~/Library/Keychains/login.keychain-db
+```
+
+`git`, `curl` and Python are **not** affected on macOS — they read their bundles
+through OpenSSL/LibreSSL, which honours the variables on every platform. And on
+Linux `SSL_CERT_FILE` works normally, so nothing extra is needed there.
+`abctl claude-code enable` prints this note when it runs on macOS.
 
 Cortex keeps running; nothing sends traffic to it. `abctl claude-code enable` puts it
 back.
@@ -180,9 +236,31 @@ pgrep -fl authbridge-prox                   # should print nothing
 ls ~/.cortex 2>/dev/null                    # should print nothing
 ```
 
-The CA that step 3 removes was only ever trusted through `NODE_EXTRA_CA_CERTS` in
-`~/.claude/settings.json` — Cortex never adds it to the system or login keychain, so
-there is nothing to clean up there.
+The CA that step 3 removes was only ever trusted through the CA variables in
+`~/.claude/settings.json` — *Cortex* never adds it to the system or login keychain.
+`bundle.crt` lives in the same directory and is derived from `ca.crt` plus a copy of
+the public roots, so removing `~/.cortex` takes it with them; it holds no private
+key and grants nothing on its own.
+
+**On macOS, if you followed the Go-tools step above** and ran
+`security add-trusted-cert` yourself, that trust setting is the one thing outside
+`~/.cortex` and outside `~/.claude/settings.json`, so it outlives both. Deleting the
+CA file does not withdraw it — the keychain holds its own copy. Remove it too:
+
+```sh
+security delete-certificate -c authbridge-tls-bridge-ca \
+  ~/Library/Keychains/login.keychain-db
+```
+
+Check whether it is there at all with:
+
+```sh
+security find-certificate -c authbridge-tls-bridge-ca ~/Library/Keychains/login.keychain-db
+```
+
+Leaving it behind means a CA whose private key you have deleted stays trusted for
+TLS — harmless in itself, since nothing can sign with it any more, but it is trust
+you did not intend to keep.
 
 #### If `abctl` is already gone
 
@@ -198,5 +276,24 @@ systemctl --user disable --now cortex.service
 rm -f ~/.config/systemd/user/cortex.service
 ```
 
-Then delete the three Cortex keys from the `env` block of
-`~/.claude/settings.json` yourself.
+Then delete the Cortex keys from the `env` block of `~/.claude/settings.json`
+yourself. There are **seven**:
+
+```
+HTTPS_PROXY
+NODE_EXTRA_CA_CERTS
+SSL_CERT_FILE
+GIT_SSL_CAINFO
+REQUESTS_CA_BUNDLE
+CURL_CA_BUNDLE
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+```
+
+**Remove all seven, and do it before `rm -rf ~/.cortex`.** The middle four point at
+`~/.cortex/ca/bundle.crt`, and unlike `NODE_EXTRA_CA_CERTS` each of them *replaces*
+its tool's trust store rather than adding to it. Leave them behind with the file
+deleted and git, curl and Python fail **every** TLS call — including calls that have
+nothing to do with Cortex — with `error setting certificate verify locations`, on a
+machine you believe you have just cleaned. `abctl claude-code disable` removes all
+seven in the right order, which is why it is step 1 above; this list is only for when
+that binary is already gone.

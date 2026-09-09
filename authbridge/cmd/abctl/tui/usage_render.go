@@ -327,14 +327,30 @@ func renderUsageSummary(snap *usage.Snapshot) string {
 		parts = append(parts, fmt.Sprintf("LATENCY %.2fs", latSum/float64(latN)/1000))
 	}
 
-	// Cost is reserved on the wire but nothing populates it yet. Say so rather
-	// than render $0.00, which reads as "this traffic was free".
-	if snap.Priced {
-		parts = append(parts, fmt.Sprintf("COST $%.4f", float64(snap.Totals.CostMicros)/1e6))
-	} else {
-		parts = append(parts, "COST unavailable")
-	}
+	parts = append(parts, renderCostSummary(snap))
 	return "  " + strings.Join(parts, "    ")
+}
+
+// renderCostSummary is the COST cell, in one of three states.
+//
+// Nothing priced: say so rather than render $0.00, which reads as "this traffic
+// was free" — a zero cost and an unknown cost are different answers.
+//
+// Partially priced: show the figure AND the coverage, because the total only
+// covers the requests that carried a cost. Cost comes from litellm-budget-track,
+// which may not be in the pipeline for all traffic and cannot price every
+// endpoint, so a window mixing priced and unpriced requests is the normal case
+// rather than an edge one. Presenting its subtotal as if it were the whole spend
+// is the failure this coverage count exists to prevent.
+func renderCostSummary(snap *usage.Snapshot) string {
+	if !snap.Priced {
+		return "COST unavailable"
+	}
+	cell := fmt.Sprintf("COST $%.4f", float64(snap.Totals.CostMicros)/1e6)
+	if snap.Totals.PricedRequests < snap.Totals.Requests {
+		cell += fmt.Sprintf(" (%d/%d priced)", snap.Totals.PricedRequests, snap.Totals.Requests)
+	}
+	return cell
 }
 
 // usageWindows are the spans the [w] key cycles.

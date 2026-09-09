@@ -100,6 +100,20 @@ tls_bridge:
   mode: enabled
   ca_dir: "` + caDir + `"
   generate_ca: true
+  # passthrough_hosts is deliberately absent. Left unset, the bridge tunnels a
+  # built-in list of developer-tooling hosts — GitHub, the Go module proxy, the
+  # package registries (tlsbridge.DefaultPassthroughHosts) — so gh, go, pip and
+  # npm keep working without being told to trust anything.
+  #
+  # That is not a compromise: no plugin can read that traffic anyway. The parsers
+  # and tool-prune act on agent<->LLM and agent<->tool messages, so forging a leaf
+  # for a module download buys nothing and breaks every Go tool, which on macOS
+  # cannot be pointed at a CA file by environment at all.
+  #
+  # Setting the key here REPLACES that list rather than adding to it, and an
+  # explicit empty list means "intercept everything". Never list an inference
+  # endpoint: skipping one silently removes the parsing and the token savings,
+  # with no error to notice it by.
 pipeline:
   outbound:
     plugins:

@@ -714,5 +714,23 @@ info "    HTTPS_PROXY=http://localhost:${DEMO_FORWARD_PORT} \\"
 info "      NODE_EXTRA_CA_CERTS=${ca_dir}/ca.crt \\"
 info "      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude"
 info ""
+# NODE_EXTRA_CA_CERTS above is Node-specific and EXTENDS the trust store, so the
+# bare CA is correct for `claude`. Every other tool's CA variable REPLACES the
+# trust store, so pointing those at ca.crt leaves them trusting this CA and
+# nothing else — they need the CA+roots bundle instead.
+info "  Other tools (git, curl, python) need bundle.crt, not ca.crt:"
+info "    GIT_SSL_CAINFO=${ca_dir}/bundle.crt"
+info "      (also REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE / SSL_CERT_FILE;"
+info "       \"${abctl_cmd}\" claude-code enable sets all of them for you)"
+info ""
+# SSL_CERT_FILE is the Go one, and Go on macOS reads roots from the keychain
+# rather than any CA file, so the variable is inert there. Only the keychain can
+# make go/gh trust the bridge on a Mac; on Linux SSL_CERT_FILE is enough.
+if [ "$(uname -s)" = "Darwin" ]; then
+	info "  On macOS, Go tools (go, gh) ignore SSL_CERT_FILE — trust the CA instead:"
+	info "    security add-trusted-cert -k ~/Library/Keychains/login.keychain-db \\"
+	info "      -p ssl ${ca_dir}/ca.crt"
+	info ""
+fi
 info "  Stop it:         \"${abctl_cmd}\" service stop      (start / restart / status too)"
 info ""

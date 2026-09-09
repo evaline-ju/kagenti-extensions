@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -50,17 +51,36 @@ type Counts struct {
 	Tokens   int64 `json:"tokens,omitempty"`
 	// CostMicros is millionths of a US dollar. An integer unit keeps bucket
 	// addition exact and JSON round-tripping lossless, which float dollars do
-	// not; a client divides by 1e6 to display. Zero when no pricer is
-	// configured, which is not the same as "this traffic was free" — the API
-	// omits the field entirely in that case rather than asserting $0.
+	// not; a client divides by 1e6 to display. Zero when nothing here could be
+	// priced, which is not the same as "this traffic was free" — the API omits
+	// the field entirely in that case rather than asserting $0.
 	CostMicros int64 `json:"costMicros,omitempty"`
+	// PricedRequests counts the requests that actually produced a cost. Coverage
+	// is a counter rather than a flag because buckets are summed when a client
+	// asks for a coarser resolution, and because a deployment can price some of
+	// its traffic and not the rest: several endpoints, rates known for some.
+	//
+	// Requests-minus-PricedRequests is the gap, correct at every resolution, and
+	// it is what stops a partial total being presented as a complete one.
+	PricedRequests int64 `json:"pricedRequests,omitempty"`
 }
 
-func (c *Counts) add(o Counts) {
+// Add accumulates o into c, field by field.
+//
+// Exported because consumers fold these too — abctl collapses low-volume series
+// into an "(other)" band — and an unexported version left them hand-summing the
+// fields in another module. That copy silently missed PricedRequests when it was
+// added, under a comment explaining that every field had to be carried. One
+// summation, in the same file as the struct, is the only way that stays true.
+//
+// Pointer receiver and mutating, matching how the aggregator accumulates on the
+// hot path. For a map value, read-modify-write: `v := m[k]; v.Add(o); m[k] = v`.
+func (c *Counts) Add(o Counts) {
 	c.Requests += o.Requests
 	c.Errors += o.Errors
 	c.Tokens += o.Tokens
 	c.CostMicros += o.CostMicros
+	c.PricedRequests += o.PricedRequests
 }
 
 // Bucket is one BucketWidth slice of time, as served to clients.
@@ -104,29 +124,37 @@ type bucket struct {
 	byPlugin map[string]Counts
 }
 
-// Pricer converts a model name and token count to millionths of a dollar.
-// Optional: a nil Pricer leaves CostMicros zero and the API omits it.
+// eventCost is one event's settled cost, decoded once per Record and passed to
+// each ring's foldInto.
 //
-// Injected rather than implemented here because rates are deployment-specific —
-// a gateway bills differently from the vendor's list price — and authlib has no
-// business asserting one.
+// Cost is read from the figure litellm-budget-track settles per response and
+// publishes on the session event (see authlib/costevent): it prefers the
+// gateway's own post-discount cost header and falls back to pricing the usage
+// block. So the number here is a plugin's measurement, not a rate table's guess,
+// and this package holds no rates of its own — deployment-specific pricing is
+// not something authlib should assert.
 //
-// TODO(cost): no caller supplies one yet, so CostMicros is always zero and
-// Snapshot reports priced:false. Two candidate sources, neither reachable from
-// here today:
-//
-//   - toolprune's defaultPatterns table has per-family rates, but it is
-//     package-private and measured against the rossoctl LiteLLM gateway, which
-//     bills well below vendor list. Applying it to a direct-to-Anthropic
-//     deployment understates cost by roughly 4x on the input tier.
-//   - litellm-budget-track already reads the authoritative post-discount figure
-//     from LiteLLM's X-Litellm-Response-Cost header, but keeps it inside the
-//     plugin. Surfacing it onto the session event would let the aggregator use a
-//     real number instead of a modelled one, which is the better fix.
-//
-// The field is reserved on the wire now so adding it later is not a breaking
-// change.
-type Pricer func(model string, tokens int64) int64
+// Traffic the plugin did not price contributes no cost and is visible as the gap
+// between Counts.PricedRequests and Counts.Requests. Modelled rates for that
+// traffic arrive with the pricing resolver; see
+// docs/superpowers/specs/2026-09-09-pricing-consolidation-design.md.
+type eventCost struct {
+	micros int64
+	// priced is 1 when a cost was found and 0 otherwise, so it sums into
+	// Counts.PricedRequests as a coverage count rather than needing a separate
+	// branch at every accumulation site.
+	priced int64
+}
+
+// decodeEventCost reads the cost event off e, if any. Zero value means unpriced,
+// which is not the same as a zero cost — see Counts.PricedRequests.
+func decodeEventCost(e *pipeline.SessionEvent) eventCost {
+	ce, ok := costevent.Decode(e)
+	if !ok {
+		return eventCost{}
+	}
+	return eventCost{micros: ce.Micros(), priced: 1}
+}
 
 // Aggregator is a fixed ring of per-minute buckets. Safe for concurrent use.
 //
@@ -142,7 +170,6 @@ type Aggregator struct {
 	all      []bucket
 	sessions map[string]*sessionRing
 	maxSess  int
-	pricer   Pricer
 	now      func() time.Time
 
 	// pending holds request-phase plugin names awaiting their response event,
@@ -188,9 +215,6 @@ type sessionRing struct {
 
 // Option configures an Aggregator.
 type Option func(*Aggregator)
-
-// WithPricer supplies cost rates. Without it, CostMicros stays zero.
-func WithPricer(p Pricer) Option { return func(a *Aggregator) { a.pricer = p } }
 
 // WithClock overrides time.Now, for deterministic tests.
 func WithClock(now func() time.Time) Option { return func(a *Aggregator) { a.now = now } }
@@ -265,6 +289,20 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 		at = a.now()
 	}
 
+	// Decoded before the lock, for the same reason the guards above are: it
+	// touches no aggregator state, and foldInto runs up to twice per event (the
+	// all-sessions ring and this session's ring), which would otherwise unmarshal
+	// the same JSON twice while holding mu.
+	//
+	// Skipped for request events, which return below without ever reaching
+	// foldInto. The cost is only ever published on the response pass, so this
+	// would find nothing anyway — but not calling it at all beats calling it and
+	// relying on that.
+	var ec eventCost
+	if e.Phase != pipeline.SessionRequest {
+		ec = decodeEventCost(e)
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -286,11 +324,11 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	}
 
 	t := at.Truncate(BucketWidth)
-	a.foldInto(a.all, t, e, requestPlugins)
+	a.foldInto(a.all, t, e, requestPlugins, ec)
 
 	if ring, ok := a.sessions[sessionID]; ok {
 		ring.lastSeen = at
-		a.foldInto(ring.buckets, t, e, requestPlugins)
+		a.foldInto(ring.buckets, t, e, requestPlugins, ec)
 		return
 	}
 	// maxSess == 0 means no per-session rings at all — see WithMaxSessions. The
@@ -308,7 +346,7 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	}
 	ring := &sessionRing{buckets: make([]bucket, NumBuckets), lastSeen: at}
 	a.sessions[sessionID] = ring
-	a.foldInto(ring.buckets, t, e, requestPlugins)
+	a.foldInto(ring.buckets, t, e, requestPlugins, ec)
 }
 
 // holdRequestPluginsLocked stashes a request event's plugin names until its
@@ -396,27 +434,24 @@ func (a *Aggregator) evictColdestLocked() {
 	}
 }
 
-func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEvent, requestPlugins []string) {
+func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEvent, requestPlugins []string, ec eventCost) {
 	b := &ring[slot(t)]
 	if !b.start.Equal(t) {
 		*b = bucket{start: t} // stale lap: reset rather than accumulate onto old data
 	}
 
-	var tokens, cost int64
+	var tokens int64
 	var model string
 	if e.Inference != nil {
 		tokens = int64(e.Inference.TotalTokens)
 		model = e.Inference.Model
-		if a.pricer != nil && tokens > 0 {
-			cost = a.pricer(model, tokens)
-		}
 	}
 
-	one := Counts{Requests: 1, Tokens: tokens, CostMicros: cost}
+	one := Counts{Requests: 1, Tokens: tokens, CostMicros: ec.micros, PricedRequests: ec.priced}
 	if e.StatusCode >= 400 || e.Phase == pipeline.SessionDenied {
 		one.Errors = 1
 	}
-	b.Counts.add(one)
+	b.Counts.Add(one)
 
 	// Latency: only from events that actually carry one. A zero duration is
 	// "not measured", not "instant", and folding it in would drag the mean down.
@@ -439,6 +474,13 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 	// plugins touched one message. Tokens are attributed whole to each plugin
 	// for the same reason: there is no defensible way to split one response's
 	// usage between the plugins that observed it.
+	//
+	// CostMicros and PricedRequests are duplicated the same way, and both are
+	// exposed under group=plugin. Summing cost across the per-plugin series
+	// therefore over-reports dollars by the number of plugins that touched each
+	// turn — a worse error than over-reporting tokens, because it reads as spend.
+	// Use Totals for any dollar figure; the per-plugin values answer "what did
+	// traffic this plugin saw cost", not "what did this plugin cost".
 	// Invocations is a POINTER and is nil whenever no plugin appended a record —
 	// which is the common case for a plain proxied response. Dereferencing it
 	// unguarded panics inside Store.Append, i.e. on the request hot path.
@@ -502,7 +544,7 @@ func addLabel(m *map[string]Counts, key string, c Counts) {
 		key = overflowLabel
 	}
 	cur := (*m)[key]
-	cur.add(c)
+	cur.Add(c)
 	(*m)[key] = cur
 }
 

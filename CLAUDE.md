@@ -4,6 +4,64 @@ This file provides context for Claude (AI assistant) when working with the `cort
 
 ## AI Assistant Instructions
 
+- **Always work in your own git worktree — never in the shared top-level checkout.**
+  Several Claude Code sessions run against this repo at once. They share one object
+  store, which is fine, but a shared *working tree* is not: `git checkout` in one
+  session rewrites files under another, and two sessions' uncommitted edits land in one
+  index. Before starting work:
+
+  ```sh
+  # Fetch into a ref only you write, so nothing can move it underneath you.
+  git fetch https://github.com/rossoctl/cortex.git main:refs/base/<topic>
+  git worktree add .worktrees/<topic> -b <branch> refs/base/<topic>
+  ```
+
+  Then stay in that directory. Leave the top-level checkout alone — treat it as a
+  reference copy someone else may be using. When the branch is merged or abandoned, tear
+  down all three things you created:
+
+  ```sh
+  git worktree remove .worktrees/<topic>   # --force if untracked files remain
+  git branch -d <branch>
+  git update-ref -d refs/base/<topic>
+  ```
+
+  `remove` cleans up its own bookkeeping, so `git worktree prune` is not needed here —
+  that is for a worktree directory someone deleted by hand. What `remove` does leave is
+  the branch, and a leftover branch is enough to make the next `worktree add -b` of that
+  name fail. Deleting the worktree directory instead of removing it is worse: the branch
+  stays checked out indefinitely.
+
+  When `branch -d` answers *not fully merged*, that is usually not what happened. It
+  judges reachability from the HEAD of whichever tree you run it in, which is normally
+  the top-level checkout you were told not to touch — so it is simply behind. PRs land
+  here as merge commits, so bring `main` up to date and `-d` will accept the branch.
+  Save `-D` for work you really are discarding: it drops unpushed commits silently.
+
+  Three things learned the hard way:
+  - **Fetch into your own ref; never branch from `FETCH_HEAD`.** `FETCH_HEAD` is
+    per-worktree, but this bootstrap has to run in the shared top-level checkout, so
+    every session fetching there writes that one file — and a fetch landing between your
+    reading it and your using it hands you a different commit than the one you checked.
+    That is how `CLAUDE.md` got reverted mid-session to a pre-rename state. Nothing but
+    you writes `refs/base/<topic>`, so there is no window to lose and no verification
+    step to remember. Do not use `refs/worktree/` for this — git reserves that namespace
+    for per-worktree refs.
+  - **A refused `worktree add` does not always mean another session holds the branch.**
+    `-b <branch>` also fails when the branch merely exists with nothing checking it out —
+    which is what a `worktree remove` without the matching `branch -d` leaves behind.
+    `git worktree list` says who actually holds what; the error text does not. When it
+    does show a live worktree on that branch, the refusal is a feature: pick another
+    name, do not force past it.
+  - **Worktrees do not isolate the running Cortex.** One `~/.cortex/config.yaml`, one
+    launchd label, one proxy on `:47600`, and every session's `HTTPS_PROXY` points at
+    it. `abctl service restart` always replaces that instance and cuts every attached
+    session. `abctl service install` only does so when it has something to change or a
+    running proxy to adopt — with nothing to do it prints `Already current` and leaves
+    the proxy alone. `--ref=main` is an `install.sh` flag, not an `abctl` one; it picks
+    which installer script runs, so whether it interrupts anything depends on what that
+    install then finds. Coordinate before any of it.
+
 - **Use `Assisted-By` for attribution** — never add `Co-Authored-By`, `Generated with Claude Code`, or similar trailers. See [Commit Attribution Policy](#commit-attribution-policy) below.
 
 ## Repository Overview

@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // configure builds a BudgetTrack with a temp-dir spend file and the given budget.
@@ -522,18 +525,50 @@ func TestZeroCostHeaderStreamedPricesFromUsage(t *testing.T) {
 	}
 }
 
-// getCostEvent pulls the emitted costEvent out of pctx.Extensions.Custom
+// getCostEvent pulls the emitted cost event out of pctx.Extensions.Custom
 // under the same key the listener would read. Nil when nothing was emitted.
-func getCostEvent(t *testing.T, pctx *pipeline.Context) *costEvent {
+func getCostEvent(t *testing.T, pctx *pipeline.Context) *costevent.Event {
 	t.Helper()
 	if pctx.Extensions.Custom == nil {
 		return nil
 	}
-	v, ok := pctx.Extensions.Custom["litellm-budget-track"+pipeline.PluginEventSuffix].(costEvent)
+	v, ok := pctx.Extensions.Custom["litellm-budget-track"+pipeline.PluginEventSuffix].(costevent.Event)
 	if !ok {
 		return nil
 	}
 	return &v
+}
+
+// TestPluginNameMatchesCostEventKey pins the plugin name to the constant the
+// aggregator and abctl look the event up by. A rename on one side only would
+// make every consumer silently stop seeing costs.
+func TestPluginNameMatchesCostEventKey(t *testing.T) {
+	if got := New().Name(); got != costevent.PluginName {
+		t.Errorf("Name() = %q, costevent.PluginName = %q", got, costevent.PluginName)
+	}
+}
+
+// TestEmitCostWireFormatUnchanged is the independent proof that promoting the
+// event struct into authlib/costevent did not alter the bytes on the wire. abctl
+// decodes these exact tags from a separate module that this change does not
+// rebuild, so a drift here would silently blank its COST column.
+func TestEmitCostWireFormatUnchanged(t *testing.T) {
+	p := configure(t, 10)
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{responseCostHeader: {"0.25"}}}
+	p.OnResponse(context.Background(), pctx)
+
+	ev := getCostEvent(t, pctx)
+	if ev == nil {
+		t.Fatal("no cost event emitted")
+	}
+	b, err := json.Marshal(*ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	const want = `{"cost_usd":0.25,"source":"gateway-header","daily_total_usd":0.25,"daily_max_usd":10}`
+	if string(b) != want {
+		t.Errorf("wire format changed:\n got %s\nwant %s", b, want)
+	}
 }
 
 // TestEmitCost_HeaderPath: OnResponse (buffered) prices from the header
@@ -551,8 +586,8 @@ func TestEmitCost_HeaderPath(t *testing.T) {
 	if ev.CostUSD != 0.0025 {
 		t.Errorf("CostUSD = %v, want 0.0025", ev.CostUSD)
 	}
-	if ev.Source != sourceGatewayHeader {
-		t.Errorf("Source = %q, want %s", ev.Source, sourceGatewayHeader)
+	if ev.Source != costevent.SourceGatewayHeader {
+		t.Errorf("Source = %q, want %s", ev.Source, costevent.SourceGatewayHeader)
 	}
 	if ev.DailyTotalUSD != 0.0025 {
 		t.Errorf("DailyTotalUSD = %v, want 0.0025", ev.DailyTotalUSD)
@@ -594,8 +629,8 @@ func TestEmitCost_UsageFallback(t *testing.T) {
 	if ev == nil {
 		t.Fatal("no costEvent emitted")
 	}
-	if ev.Source != sourceUsageFallback {
-		t.Errorf("Source = %q, want %s", ev.Source, sourceUsageFallback)
+	if ev.Source != costevent.SourceUsageFallback {
+		t.Errorf("Source = %q, want %s", ev.Source, costevent.SourceUsageFallback)
 	}
 	want := 100*1e-6 + 40*5e-6
 	if ev.CostUSD < want-1e-12 || ev.CostUSD > want+1e-12 {
@@ -701,5 +736,91 @@ func TestOnRequestUnderBudgetRecordsNothing(t *testing.T) {
 	if pctx.Extensions.Invocations != nil && len(pctx.Extensions.Invocations.Inbound) > 0 {
 		t.Errorf("under-budget OnRequest recorded %d invocations, want 0",
 			len(pctx.Extensions.Invocations.Inbound))
+	}
+}
+
+// TestEndToEnd_CostReachesUsageAggregator closes the loop this plugin's cost
+// event depends on but no unit test covers: the plugin writes to
+// pctx.Extensions.Custom, a listener promotes that to SessionEvent.Plugins via
+// pipeline.SnapshotPlugins, and session.Store.Append fans the event out to the
+// usage Aggregator as a Recorder.
+//
+// Every step there is a separate package, and the ordering matters — if the
+// listener appended before snapshotting the plugin map, or SnapshotPlugins
+// dropped the key, /v1/usage would silently report no cost while every unit test
+// still passed. This asserts the composed path, not the pieces.
+func TestEndToEnd_CostReachesUsageAggregator(t *testing.T) {
+	p := configure(t, 10)
+	agg := usage.New()
+	store := session.New(time.Hour, 100, 10)
+	store.AddRecorder(agg)
+
+	// The plugin prices a response, exactly as OnResponse would in a pipeline.
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{responseCostHeader: {"0.0421"}}}
+	p.OnResponse(context.Background(), pctx)
+
+	// The listener's promotion step, verbatim from forwardproxy/server.go.
+	store.Append("sess-e2e", pipeline.SessionEvent{
+		At:        time.Now(),
+		Direction: pipeline.Outbound,
+		Phase:     pipeline.SessionResponse,
+		RequestID: "req-e2e",
+		Host:      "litellm.corp",
+		Inference: &pipeline.InferenceExtension{Model: "claude-opus-5", TotalTokens: 1000},
+		Plugins:   pipeline.SnapshotPlugins(pctx.Extensions.Custom),
+	})
+
+	snap := agg.Snapshot(usage.BucketWidth, usage.BucketWidth, "", usage.GroupNone)
+	if !snap.Priced {
+		t.Error("Priced = false: the cost never reached the aggregator")
+	}
+	if snap.Totals.CostMicros != 42_100 {
+		t.Errorf("CostMicros = %d, want 42100", snap.Totals.CostMicros)
+	}
+	if snap.Totals.PricedRequests != 1 {
+		t.Errorf("PricedRequests = %d, want 1", snap.Totals.PricedRequests)
+	}
+}
+
+// TestEndToEnd_UnpricedResponseReachesAggregatorUnpriced is the negative control
+// for the test above. Same composed path, same assertions, only the plugin does
+// not price the response (no cost header, no configured rates). Without it, a
+// wiring bug that made everything look priced — or an assertion that could not
+// fail — would pass unnoticed.
+func TestEndToEnd_UnpricedResponseReachesAggregatorUnpriced(t *testing.T) {
+	p := configure(t, 10)
+	agg := usage.New()
+	store := session.New(time.Hour, 100, 10)
+	store.AddRecorder(agg)
+
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{}} // nothing to price
+	p.OnResponse(context.Background(), pctx)
+
+	store.Append("sess-e2e-unpriced", pipeline.SessionEvent{
+		At:        time.Now(),
+		Direction: pipeline.Outbound,
+		Phase:     pipeline.SessionResponse,
+		RequestID: "req-e2e-unpriced",
+		Host:      "litellm.corp",
+		Inference: &pipeline.InferenceExtension{Model: "claude-opus-5", TotalTokens: 1000},
+		Plugins:   pipeline.SnapshotPlugins(pctx.Extensions.Custom),
+	})
+
+	snap := agg.Snapshot(usage.BucketWidth, usage.BucketWidth, "", usage.GroupNone)
+	if snap.Priced {
+		t.Error("Priced = true for a response the plugin never priced")
+	}
+	if snap.Totals.CostMicros != 0 {
+		t.Errorf("CostMicros = %d, want 0", snap.Totals.CostMicros)
+	}
+	if snap.Totals.PricedRequests != 0 {
+		t.Errorf("PricedRequests = %d, want 0", snap.Totals.PricedRequests)
+	}
+	// The request still counted as traffic — unpriced is not invisible.
+	if snap.Totals.Requests != 1 {
+		t.Errorf("Requests = %d, want 1", snap.Totals.Requests)
+	}
+	if snap.Totals.Tokens != 1000 {
+		t.Errorf("Tokens = %d, want 1000", snap.Totals.Tokens)
 	}
 }

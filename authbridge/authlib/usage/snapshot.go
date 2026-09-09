@@ -55,9 +55,16 @@ type Snapshot struct {
 	// Totals sums every bucket, so a client need not re-add them to render a
 	// summary line.
 	Totals Counts `json:"totals"`
-	// Priced reports whether a Pricer was configured. Without it CostMicros is
-	// absent everywhere, and a client must say "cost unavailable" rather than
-	// display $0.00 — which would read as "this traffic was free".
+	// Priced reports whether ANY request in this window produced a cost. False
+	// means CostMicros is absent everywhere, and a client must say "cost
+	// unavailable" rather than display $0.00 — which would read as "this traffic
+	// was free".
+	//
+	// True does NOT mean every request was priced. Compare Totals.PricedRequests
+	// against Totals.Requests: cost comes from a plugin that may not be in the
+	// pipeline for all traffic, and once rates are per-endpoint a deployment can
+	// price some endpoints and not others. Where those differ the dollar total
+	// covers only the priced subset, and a client showing it must say so.
 	Priced bool `json:"priced"`
 }
 
@@ -144,7 +151,7 @@ func fold(src []Bucket, width time.Duration) []Bucket {
 		series := map[string]Counts{}
 
 		for _, b := range src[i:end] {
-			acc.Counts.add(b.Counts)
+			acc.Counts.Add(b.Counts)
 			// Weighted by LatSamples, not Requests: the source mean was computed
 			// over measured requests only, so reconstituting with Requests would
 			// re-introduce the dilution latStats exists to avoid.
@@ -159,7 +166,7 @@ func fold(src []Bucket, width time.Duration) []Bucket {
 			}
 			for k, v := range b.Series {
 				cur := series[k]
-				cur.add(v)
+				cur.Add(v)
 				series[k] = cur
 			}
 		}
@@ -221,7 +228,6 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 		BucketSeconds: int(resolution / time.Second),
 		Session:       sessionID,
 		Group:         group,
-		Priced:        a.pricer != nil,
 		Buckets:       make([]Bucket, 0, n),
 	}
 
@@ -236,9 +242,13 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 				b.Series = src.series(group)
 			}
 		}
-		out.Totals.add(b.Counts)
+		out.Totals.Add(b.Counts)
 		out.Buckets = append(out.Buckets, b)
 	}
+	// Derived after the loop: Totals is only complete once every bucket has been
+	// added, so this cannot be set in the literal above.
+	out.Priced = out.Totals.PricedRequests > 0
+
 	// Fold last: totals are summed from the raw buckets above and are unaffected
 	// by grouping width, so a client's summary line agrees with its chart no
 	// matter which resolution it asked for.

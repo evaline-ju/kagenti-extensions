@@ -284,3 +284,52 @@ func TestRenderBars_TicksFallOnBarBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// The COST cell has three states, and the partial one is the reason
+// usage.Counts.PricedRequests exists: cost comes from litellm-budget-track, which
+// need not be in the pipeline for all traffic, so a window that mixes priced and
+// unpriced requests is normal. Showing its subtotal bare would read as total spend.
+func TestRenderCostSummary(t *testing.T) {
+	tests := []struct {
+		name string
+		snap usage.Snapshot
+		want string
+	}{
+		{
+			name: "nothing priced",
+			snap: usage.Snapshot{Totals: usage.Counts{Requests: 40}, Priced: false},
+			want: "COST unavailable",
+		},
+		{
+			name: "fully priced omits the coverage note",
+			snap: usage.Snapshot{
+				Totals: usage.Counts{Requests: 40, PricedRequests: 40, CostMicros: 1_842_100},
+				Priced: true,
+			},
+			want: "COST $1.8421",
+		},
+		{
+			name: "partially priced names the coverage",
+			snap: usage.Snapshot{
+				Totals: usage.Counts{Requests: 57, PricedRequests: 42, CostMicros: 1_842_100},
+				Priced: true,
+			},
+			want: "COST $1.8421 (42/57 priced)",
+		},
+		{
+			name: "one priced request out of many",
+			snap: usage.Snapshot{
+				Totals: usage.Counts{Requests: 100, PricedRequests: 1, CostMicros: 500},
+				Priced: true,
+			},
+			want: "COST $0.0005 (1/100 priced)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderCostSummary(&tc.snap); got != tc.want {
+				t.Errorf("renderCostSummary() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

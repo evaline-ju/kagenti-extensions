@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -438,6 +439,36 @@ func main() {
 				"ca_dir", cfg.TLSBridge.CADir,
 				"hint", "clients must trust it, e.g. NODE_EXTRA_CA_CERTS="+cfg.TLSBridge.CADir+"/ca.crt")
 		}
+		// Assemble the CA + platform-roots bundle for tools whose CA setting
+		// REPLACES their trust store rather than extending it (Go's SSL_CERT_FILE,
+		// GIT_SSL_CAINFO, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE). Pointing those at
+		// ca.crt alone leaves the process trusting this CA and nothing else, which
+		// breaks every unproxied TLS connection it makes.
+		//
+		// This runs per boot and is a snapshot, not a subscription — see
+		// EnsureTrustBundle's doc for what that costs, notably that a root the OS
+		// distrusts after this point keeps being trusted until the next restart.
+		//
+		// Non-fatal in every case: the bridge works without the bundle, only a
+		// client's ability to verify it is affected.
+		bundlePath, berr := tlsbridge.EnsureTrustBundle(cfg.TLSBridge.CADir)
+		switch {
+		case berr == nil:
+			slog.Info("tls-bridge: CA trust bundle ready", "path", bundlePath)
+		case errors.Is(berr, tlsbridge.ErrCADirNotWritable):
+			// The in-cluster norm: ca_dir is a read-only cert-manager Secret mount,
+			// and a sidecar has no use for the bundle anyway — it exists so a
+			// developer's git/curl/Python can verify a laptop bridge. Warning here
+			// would name four laptop-only variables on every production boot.
+			slog.Debug("tls-bridge: no CA trust bundle (ca_dir is read-only, normal for a "+
+				"mounted Secret); in-cluster clients trust the CA through their own config",
+				"ca_dir", cfg.TLSBridge.CADir)
+		default:
+			slog.Warn("tls-bridge: no CA trust bundle written; tools whose CA setting replaces the "+
+				"trust store (SSL_CERT_FILE, GIT_SSL_CAINFO, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE) "+
+				"have no safe file to point at",
+				"ca_dir", cfg.TLSBridge.CADir, "error", berr)
+		}
 		var extra []byte
 		if cfg.TLSBridge.UpstreamCABundle != "" {
 			if extra, err = os.ReadFile(cfg.TLSBridge.UpstreamCABundle); err != nil {
@@ -456,10 +487,17 @@ func main() {
 				ports[p] = true
 			}
 		}
+		// A bad passthrough pattern is fatal rather than ignored: silently not
+		// matching presents as "the bridge broke my tool", with nothing tying the
+		// symptom back to the typo.
+		decision, derr := tlsbridge.NewDecision(tlsbridge.DecisionOpts{
+			Ports: ports, SkipHosts: cfg.TLSBridge.PassthroughHosts,
+		})
+		if derr != nil {
+			log.Fatalf("tls-bridge: %v", derr)
+		}
 		bridge = &tlsbridge.Engine{
-			Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
-				Ports: ports, SkipHosts: cfg.TLSBridge.PassthroughHosts,
-			}),
+			Decision: decision,
 			Term:     tlsbridge.NewTerminator(minter),
 			Skip:     tlsbridge.NewSkipSet(),
 			Upstream: up,

@@ -43,24 +43,24 @@ import (
 // it is written down so the decision to expose it is a decision rather than an
 // oversight.
 //
-// TODO(cost): costMicros is on the wire format but nothing populates it yet —
-// no Pricer is wired at construction, so Snapshot reports priced:false and omits
-// every cost field. The rates exist already, in the toolprune plugin's
-// defaultPatterns table, but they are package-private there and explicitly
-// documented as gateway-specific: that table measures the rossoctl LiteLLM
-// gateway, which bills well below vendor list, so applying it to a
-// direct-to-Anthropic deployment would understate cost by roughly 4x on the
-// input tier. Publishing a number that wrong is worse than publishing none.
+// costMicros is populated from the per-request figure litellm-budget-track
+// settles and publishes on the session event: it prefers LiteLLM's own
+// X-Litellm-Response-Cost header — the authoritative post-discount cost — and
+// falls back to pricing the parsed usage block when the header reports 0, which
+// every streamed response does. The figure is therefore that plugin's
+// measurement rather than a rate table's guess, and this package models no rates
+// itself.
 //
-// The shape of the fix is either to promote those rates into a shared package
-// both toolprune and this aggregator consume, or — better — to have a plugin
-// that already knows the true cost report it per response, which
-// litellm-budget-track effectively does: it reads LiteLLM's own
-// X-Litellm-Response-Cost header, the authoritative post-discount figure. That
-// would need the cost surfaced onto the session event, where the aggregator can
-// see it; today it stays inside the plugin. Until then the field is reserved so
-// adding it later is not a wire-format break, and priced:false tells a client to
-// render "cost unavailable" rather than $0.00.
+// Requests the plugin did not price contribute no cost and appear as the gap
+// between totals.pricedRequests and totals.requests. Where those differ the
+// dollar total covers only the priced subset, so a client rendering it must
+// present it as partial rather than complete. priced:false means nothing at all
+// was priced — render "cost unavailable", never $0.00, which would read as "this
+// traffic was free".
+//
+// Modelled rates for traffic with no cost event (no litellm-budget-track in the
+// pipeline, or an endpoint it cannot price) arrive with the pricing resolver; see
+// docs/superpowers/specs/2026-09-09-pricing-consolidation-design.md.
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if s.usage == nil {
 		// Aggregation not wired up (session store disabled, or an older binary

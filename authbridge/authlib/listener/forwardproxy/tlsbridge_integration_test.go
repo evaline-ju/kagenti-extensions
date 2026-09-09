@@ -20,6 +20,18 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 )
 
+// mustBridgeDecision builds a Decision for a single port. NewDecision grew an
+// error return when passthrough_hosts gained glob support; these tests pass no
+// patterns, so the only way it can fail is a bug in the shipped defaults.
+func mustBridgeDecision(t *testing.T, port int) *tlsbridge.Decision {
+	t.Helper()
+	d, err := tlsbridge.NewDecision(tlsbridge.DecisionOpts{Ports: map[int]bool{port: true}})
+	if err != nil {
+		t.Fatalf("NewDecision: %v", err)
+	}
+	return d
+}
+
 // bridgeProbePlugin records the decrypted request method/path/headers it sees.
 // It proves the UNCHANGED outbound pipeline runs on the plaintext request the
 // TLS bridge produced after terminating the agent's TLS — i.e. the bridge
@@ -107,9 +119,7 @@ func TestTransparentBridge(t *testing.T) {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
 	engine := &tlsbridge.Engine{
-		Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
-			Ports: map[int]bool{portOf(originHostPort): true},
-		}),
+		Decision: mustBridgeDecision(t, portOf(originHostPort)),
 		Term:     tlsbridge.NewTerminator(minter),
 		Skip:     tlsbridge.NewSkipSet(),
 		Upstream: up,
@@ -265,9 +275,7 @@ func TestTransparentBridge_CustomPort(t *testing.T) {
 	engine := &tlsbridge.Engine{
 		// Only the custom port is configured — proves both that it IS bridged
 		// (despite shouldSniff not knowing it) and that the default set is replaced.
-		Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
-			Ports: map[int]bool{customPort: true},
-		}),
+		Decision: mustBridgeDecision(t, customPort),
 		Term:     tlsbridge.NewTerminator(minter),
 		Skip:     tlsbridge.NewSkipSet(),
 		Upstream: up,
@@ -379,9 +387,7 @@ func TestConnectBridge(t *testing.T) {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
 	engine := &tlsbridge.Engine{
-		Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
-			Ports: map[int]bool{portOf(originHostPort): true},
-		}),
+		Decision: mustBridgeDecision(t, portOf(originHostPort)),
 		Term:     tlsbridge.NewTerminator(minter),
 		Skip:     tlsbridge.NewSkipSet(),
 		Upstream: up,
@@ -570,9 +576,7 @@ func TestBridge_UnverifiableUpstream_FallsOpenToTunnel(t *testing.T) {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
 	engine := &tlsbridge.Engine{
-		Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
-			Ports: map[int]bool{portOf(originHostPort): true},
-		}),
+		Decision: mustBridgeDecision(t, portOf(originHostPort)),
 		Term:     tlsbridge.NewTerminator(minter),
 		Skip:     tlsbridge.NewSkipSet(),
 		Upstream: up,
@@ -708,9 +712,7 @@ func TestBridge_PinnedClient_AutoSkipsThenTunnels(t *testing.T) {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
 	engine := &tlsbridge.Engine{
-		Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
-			Ports: map[int]bool{portOf(originHostPort): true},
-		}),
+		Decision: mustBridgeDecision(t, portOf(originHostPort)),
 		Term:     tlsbridge.NewTerminator(minter),
 		Skip:     tlsbridge.NewSkipSet(),
 		Upstream: up,
@@ -872,9 +874,7 @@ func TestBridge_NonTLS_Passthrough(t *testing.T) {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
 	engine := &tlsbridge.Engine{
-		Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
-			Ports: map[int]bool{portOf(originHostPort): true},
-		}),
+		Decision: mustBridgeDecision(t, portOf(originHostPort)),
 		Term:     tlsbridge.NewTerminator(minter),
 		Skip:     tlsbridge.NewSkipSet(),
 		Upstream: up,

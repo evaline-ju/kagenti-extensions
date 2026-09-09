@@ -61,7 +61,7 @@ func TestHandleUsage_Defaults(t *testing.T) {
 		t.Errorf("bucketSeconds = %d, want 60", snap.BucketSeconds)
 	}
 	if snap.Priced {
-		t.Error("priced = true with no Pricer wired")
+		t.Error("priced = true when no request carried a cost event")
 	}
 }
 

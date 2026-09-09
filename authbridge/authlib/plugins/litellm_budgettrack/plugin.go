@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 )
@@ -83,27 +84,9 @@ func (c budgetTrackConfig) cacheReadRate() float64 {
 // streaming frames until the terminal frame prices it.
 const stateKey = "litellm-budget-track"
 
-// Wire values for costEvent.Source — consumers branch on these.
-const (
-	sourceGatewayHeader = "gateway-header"
-	sourceUsageFallback = "usage-fallback"
-)
-
-// costEvent surfaces one priced response. Emitted per response when
-// cost > 0; consumers see it as SessionEvent.Plugins["litellm-budget-track"].
-type costEvent struct {
-	CostUSD float64 `json:"cost_usd"`
-
-	// Source is sourceGatewayHeader (authoritative x-litellm-response-cost)
-	// or sourceUsageFallback (priced from token counters, used for streamed
-	// responses whose header always reports 0).
-	Source string `json:"source"`
-
-	// DailyTotalUSD is the ledger total after this response was added.
-	// DailyMaxUSD is the configured cap.
-	DailyTotalUSD float64 `json:"daily_total_usd"`
-	DailyMaxUSD   float64 `json:"daily_max_usd"`
-}
+// The per-response cost event this plugin publishes lives in authlib/costevent:
+// the usage aggregator and abctl both decode it, so the shape belongs where all
+// three can share one declaration rather than in this package.
 
 // usageState accumulates the largest token counts seen across a stream's
 // frames. Anthropic reports input_tokens in message_start and the cumulative
@@ -216,7 +199,7 @@ func (p *BudgetTrack) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 func (p *BudgetTrack) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if cost, _ := headerCost(pctx); cost > 0 {
 		if total, ok := p.accumulate(cost); ok {
-			p.emitCost(pctx, cost, sourceGatewayHeader, total)
+			p.emitCost(pctx, cost, costevent.SourceGatewayHeader, total)
 		}
 	}
 	return pipeline.Action{Type: pipeline.Continue}
@@ -267,7 +250,7 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	st.settled = true
 
 	cost, present := headerCost(pctx)
-	source := sourceGatewayHeader
+	source := costevent.SourceGatewayHeader
 	if cost <= 0 {
 		// Fall back to per-token pricing only when there is no authoritative
 		// header cost: the header is absent, or this is a streamed response
@@ -282,7 +265,7 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 				float64(st.cacheWriteTokens)*p.cfg.cacheWriteRate() +
 				float64(st.cacheReadTokens)*p.cfg.cacheReadRate() +
 				float64(st.outputTokens)*p.cfg.OutputCostPerToken
-			source = sourceUsageFallback
+			source = costevent.SourceUsageFallback
 		}
 	}
 	if cost > 0 {
@@ -319,7 +302,7 @@ func (p *BudgetTrack) emitCost(pctx *pipeline.Context, cost float64, source stri
 	if pctx.Extensions.Custom == nil {
 		pctx.Extensions.Custom = map[string]any{}
 	}
-	pctx.Extensions.Custom[p.Name()+pipeline.PluginEventSuffix] = costEvent{
+	pctx.Extensions.Custom[p.Name()+pipeline.PluginEventSuffix] = costevent.Event{
 		CostUSD:       cost,
 		Source:        source,
 		DailyTotalUSD: dailyTotal,

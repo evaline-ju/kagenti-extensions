@@ -1,12 +1,14 @@
 package usage
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -26,6 +28,144 @@ func respEvent(at time.Time, status int, dur time.Duration, model string, tokens
 		e.Inference = &pipeline.InferenceExtension{Model: model, TotalTokens: tokens}
 	}
 	return e
+}
+
+// withCost attaches the cost event litellm-budget-track publishes, exactly as a
+// listener would after SnapshotPlugins. Returns e so it composes with respEvent.
+func withCost(t *testing.T, e *pipeline.SessionEvent, costUSD float64) *pipeline.SessionEvent {
+	t.Helper()
+	raw, err := json.Marshal(costevent.Event{
+		CostUSD: costUSD,
+		Source:  costevent.SourceGatewayHeader,
+	})
+	if err != nil {
+		t.Fatalf("marshal cost event: %v", err)
+	}
+	if e.Plugins == nil {
+		e.Plugins = map[string]json.RawMessage{}
+	}
+	e.Plugins[costevent.PluginName] = raw
+	return e
+}
+
+// TestCountsAddFoldsPricedRequests is why coverage is a counter and not a
+// boolean: buckets are summed when a client asks for a coarser resolution, and
+// a bool cannot express "12 of 40 requests in this window were priced".
+func TestCountsAddFoldsPricedRequests(t *testing.T) {
+	a := Counts{Requests: 10, CostMicros: 500, PricedRequests: 4}
+	a.Add(Counts{Requests: 5, CostMicros: 250, PricedRequests: 3})
+
+	if a.Requests != 15 {
+		t.Errorf("Requests = %d, want 15", a.Requests)
+	}
+	if a.CostMicros != 750 {
+		t.Errorf("CostMicros = %d, want 750", a.CostMicros)
+	}
+	if a.PricedRequests != 7 {
+		t.Errorf("PricedRequests = %d, want 7", a.PricedRequests)
+	}
+	if unpriced := a.Requests - a.PricedRequests; unpriced != 8 {
+		t.Errorf("unpriced = %d, want 8", unpriced)
+	}
+}
+
+// TestCountsPricedRequestsOmittedWhenZero keeps the wire quiet for deployments
+// that price nothing.
+func TestCountsPricedRequestsOmittedWhenZero(t *testing.T) {
+	b, err := json.Marshal(Counts{Requests: 3})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "pricedRequests") {
+		t.Errorf("zero PricedRequests should be omitted, got %s", b)
+	}
+}
+
+// The cost is taken from the figure litellm-budget-track already settled and
+// published, not modelled here from a rate table.
+func TestRecord_PricesFromCostEvent(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 30, 0, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)))
+
+	a.Record("s1", withCost(t, respEvent(now, 200, time.Second, "claude-opus-5", 1000), 0.0421))
+
+	snap := a.Snapshot(time.Minute, BucketWidth, "", GroupNone)
+	if snap.Totals.Requests != 1 {
+		t.Fatalf("Requests = %d, want 1", snap.Totals.Requests)
+	}
+	if snap.Totals.CostMicros != 42_100 {
+		t.Errorf("CostMicros = %d, want 42100", snap.Totals.CostMicros)
+	}
+	if snap.Totals.PricedRequests != 1 {
+		t.Errorf("PricedRequests = %d, want 1", snap.Totals.PricedRequests)
+	}
+}
+
+// Partial coverage: the dollar total covers only the priced subset, and the gap
+// between PricedRequests and Requests is what tells a client to say so rather
+// than present the figure as complete.
+func TestRecord_MixedCoverage(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 30, 0, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)))
+
+	a.Record("s1", withCost(t, respEvent(now, 200, time.Second, "claude-opus-5", 1000), 0.02))
+	a.Record("s1", respEvent(now, 200, time.Second, "unpriced-model", 500)) // no cost event
+
+	snap := a.Snapshot(time.Minute, BucketWidth, "", GroupNone)
+	if snap.Totals.Requests != 2 {
+		t.Fatalf("Requests = %d, want 2", snap.Totals.Requests)
+	}
+	if snap.Totals.PricedRequests != 1 {
+		t.Errorf("PricedRequests = %d, want 1", snap.Totals.PricedRequests)
+	}
+	if snap.Totals.CostMicros != 20_000 {
+		t.Errorf("CostMicros = %d, want 20000 (only the priced request)", snap.Totals.CostMicros)
+	}
+	// Tokens are unaffected by pricing: a request nobody could price is still a
+	// request that sent tokens.
+	if snap.Totals.Tokens != 1500 {
+		t.Errorf("Tokens = %d, want 1500 (both requests)", snap.Totals.Tokens)
+	}
+}
+
+func TestRecord_UnpricedContributesNoCost(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 30, 0, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)))
+
+	a.Record("s1", respEvent(now, 200, time.Second, "claude-opus-5", 700))
+
+	snap := a.Snapshot(time.Minute, BucketWidth, "", GroupNone)
+	if snap.Totals.CostMicros != 0 {
+		t.Errorf("CostMicros = %d, want 0", snap.Totals.CostMicros)
+	}
+	if snap.Totals.PricedRequests != 0 {
+		t.Errorf("PricedRequests = %d, want 0", snap.Totals.PricedRequests)
+	}
+	if snap.Totals.Tokens != 700 {
+		t.Errorf("Tokens = %d, want 700", snap.Totals.Tokens)
+	}
+}
+
+// Coverage must survive folding to a coarser resolution, which is the whole
+// reason it is a counter.
+func TestRecord_CoverageFoldsAcrossBuckets(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 2, 30, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)))
+
+	a.Record("s1", withCost(t, respEvent(now.Add(-time.Minute), 200, time.Second, "m", 100), 0.01))
+	a.Record("s1", respEvent(now.Add(-time.Minute), 200, time.Second, "m", 100))
+	a.Record("s1", withCost(t, respEvent(now, 200, time.Second, "m", 100), 0.02))
+
+	folded := a.Snapshot(2*time.Minute, 2*time.Minute, "", GroupNone).Buckets[0]
+	if folded.Requests != 3 {
+		t.Fatalf("folded Requests = %d, want 3", folded.Requests)
+	}
+	if folded.PricedRequests != 2 {
+		t.Errorf("folded PricedRequests = %d, want 2", folded.PricedRequests)
+	}
+	if folded.CostMicros != 30_000 {
+		t.Errorf("folded CostMicros = %d, want 30000", folded.CostMicros)
+	}
 }
 
 // An idle minute must come back as a present, zeroed bucket. A client cannot
@@ -218,32 +358,66 @@ func TestSnapshot_AllGroupingsPopulatedFromOnePass(t *testing.T) {
 	}
 }
 
-// Cost is opt-in. Without a Pricer, CostMicros stays zero AND Priced is false,
-// so a client can say "unavailable" instead of rendering $0.00.
-func TestSnapshot_CostRequiresPricer(t *testing.T) {
+// Cost needs a source. Without a cost event on the request, CostMicros stays
+// zero AND Priced is false, so a client can say "unavailable" instead of
+// rendering $0.00 — which would read as "this traffic was free".
+//
+// Formerly TestSnapshot_CostRequiresPricer: the assertions are unchanged, but the
+// source is now the figure litellm-budget-track publishes rather than an injected
+// Pricer that no production caller ever supplied.
+func TestSnapshot_CostRequiresACostSource(t *testing.T) {
 	now := time.Date(2026, 9, 4, 23, 30, 30, 0, time.UTC)
 
 	unpriced := New(WithClock(fixedClock(now)))
 	unpriced.Record("s1", respEvent(now, 200, time.Second, "claude-sonnet-5", 1000))
 	snap := unpriced.Snapshot(time.Minute, BucketWidth, "", GroupNone)
 	if snap.Priced {
-		t.Error("Priced = true with no pricer configured")
+		t.Error("Priced = true with no cost event on any request")
 	}
 	if snap.Totals.CostMicros != 0 {
 		t.Errorf("costMicros = %d, want 0", snap.Totals.CostMicros)
 	}
 
-	// 1520 micros per 1000 tokens (roughly sonnet input at $1.52/Mtok).
-	priced := New(WithClock(fixedClock(now)),
-		WithPricer(func(_ string, tokens int64) int64 { return tokens * 1520 / 1000 }))
-	priced.Record("s1", respEvent(now, 200, time.Second, "claude-sonnet-5", 1000))
+	// $0.00152 — roughly 1000 sonnet input tokens at $1.52/Mtok.
+	priced := New(WithClock(fixedClock(now)))
+	priced.Record("s1", withCost(t, respEvent(now, 200, time.Second, "claude-sonnet-5", 1000), 0.00152))
 	snap = priced.Snapshot(time.Minute, BucketWidth, "", GroupNone)
 	if !snap.Priced {
-		t.Error("Priced = false with a pricer configured")
+		t.Error("Priced = false after a request carried a cost event")
 	}
 	if snap.Totals.CostMicros != 1520 {
 		t.Errorf("costMicros = %d, want 1520", snap.Totals.CostMicros)
 	}
+}
+
+// Priced is derived from what actually happened, not from whether a hook was
+// installed. Partial coverage still reports Priced — the caller distinguishes
+// complete from partial by comparing PricedRequests against Requests.
+func TestSnapshot_PricedDerivedFromCoverage(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 30, 0, 0, time.UTC)
+
+	t.Run("nothing priced", func(t *testing.T) {
+		a := New(WithClock(fixedClock(now)))
+		a.Record("s", respEvent(now, 200, time.Second, "m", 100))
+		if a.Snapshot(time.Minute, BucketWidth, "", GroupNone).Priced {
+			t.Error("Priced = true, want false when no request was priced")
+		}
+	})
+
+	t.Run("partially priced still reports priced", func(t *testing.T) {
+		a := New(WithClock(fixedClock(now)))
+		a.Record("s", withCost(t, respEvent(now, 200, time.Second, "m", 100), 0.01))
+		a.Record("s", respEvent(now, 200, time.Second, "n", 100))
+
+		snap := a.Snapshot(time.Minute, BucketWidth, "", GroupNone)
+		if !snap.Priced {
+			t.Error("Priced = false, want true")
+		}
+		if snap.Totals.PricedRequests != 1 || snap.Totals.Requests != 2 {
+			t.Errorf("coverage = %d/%d, want 1/2",
+				snap.Totals.PricedRequests, snap.Totals.Requests)
+		}
+	})
 }
 
 // Per-session rings must isolate: one session's traffic cannot appear in
