@@ -632,3 +632,60 @@ func TestEmitCost_NoEmitWhenUnpriced(t *testing.T) {
 		})
 	}
 }
+
+// TestOnRequestRecordsDenyInvocation: the 429 path must record a deny
+// Invocation with the spend snapshot, or phase:"denied" never surfaces.
+func TestOnRequestRecordsDenyInvocation(t *testing.T) {
+	p := configure(t, 0.001)
+
+	// Push past the budget so the next OnRequest denies.
+	p.OnResponse(context.Background(), &pipeline.Context{
+		ResponseHeaders: http.Header{responseCostHeader: {"0.002"}},
+	})
+
+	pctx := &pipeline.Context{}
+	action := p.OnRequest(context.Background(), pctx)
+	if action.Type != pipeline.Reject {
+		t.Fatalf("OnRequest() over budget = %v, want Reject", action.Type)
+	}
+
+	if pctx.Extensions.Invocations == nil {
+		t.Fatal("no Invocations recorded on deny path")
+	}
+	inv := pctx.Extensions.Invocations.Inbound
+	if len(inv) != 1 {
+		t.Fatalf("Inbound invocations = %d, want 1", len(inv))
+	}
+	got := inv[0]
+	if got.Action != pipeline.ActionDeny {
+		t.Errorf("Action = %q, want deny", got.Action)
+	}
+	if got.Reason != "budget.exceeded" {
+		t.Errorf("Reason = %q, want budget.exceeded", got.Reason)
+	}
+	// Snapshot must match the ledger the plugin actually checked — not a
+	// stale zero from before the OnResponse above.
+	if got.Details["daily_spent_usd"] != "0.002" {
+		t.Errorf("Details[daily_spent_usd] = %q, want 0.002", got.Details["daily_spent_usd"])
+	}
+	if got.Details["daily_max_usd"] != "0.001" {
+		t.Errorf("Details[daily_max_usd] = %q, want 0.001", got.Details["daily_max_usd"])
+	}
+	if got.Details["total_calls"] != "1" {
+		t.Errorf("Details[total_calls] = %q, want 1", got.Details["total_calls"])
+	}
+}
+
+// TestOnRequestUnderBudgetRecordsNothing: allow-path stays clean; an
+// always-record plugin would clutter every timeline.
+func TestOnRequestUnderBudgetRecordsNothing(t *testing.T) {
+	p := configure(t, 5.00)
+	pctx := &pipeline.Context{}
+	if action := p.OnRequest(context.Background(), pctx); action.Type != pipeline.Continue {
+		t.Fatalf("OnRequest() under budget = %v, want Continue", action.Type)
+	}
+	if pctx.Extensions.Invocations != nil && len(pctx.Extensions.Invocations.Inbound) > 0 {
+		t.Errorf("under-budget OnRequest recorded %d invocations, want 0",
+			len(pctx.Extensions.Invocations.Inbound))
+	}
+}

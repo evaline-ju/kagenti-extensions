@@ -185,9 +185,23 @@ func (p *BudgetTrack) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 	p.mu.Lock()
 	p.resetIfNewDay()
 	spend := p.ledger.TotalSpend
+	calls := p.ledger.TotalCalls
 	p.mu.Unlock()
 
 	if spend >= p.cfg.MaxBudget {
+		// Record before returning — phase:"denied" events only surface when a
+		// plugin recorded first, so skipping this hides the "why was I cut off?"
+		// answer from the session API.
+		pctx.Record(pipeline.Invocation{
+			Action: pipeline.ActionDeny,
+			Reason: "budget.exceeded",
+			Details: map[string]string{
+				// -1 precision: shortest exact representation.
+				"daily_spent_usd": strconv.FormatFloat(spend, 'f', -1, 64),
+				"daily_max_usd":   strconv.FormatFloat(p.cfg.MaxBudget, 'f', -1, 64),
+				"total_calls":     strconv.Itoa(calls),
+			},
+		})
 		return pipeline.DenyStatus(429, "budget.exceeded",
 			fmt.Sprintf("Cortex ExceededTokenBudget: daily spend $%.4f exceeds budget $%.2f. Reset at midnight UTC.", spend, p.cfg.MaxBudget))
 	}
