@@ -237,16 +237,17 @@ see [`superpowers/specs/2026-09-09-pricing-consolidation-design.md`](./superpowe
 
 ## Build
 
-The plugin is included by default in `authbridge-proxy` builds. To exclude:
+Every plugin is opt-in. This one is carried by the `full` and `lite` profiles;
+to link it explicitly:
 
 ```bash
-go build -tags exclude_plugin_litellm_budgettrack ./cmd/authbridge-proxy/
+go build -tags include_plugin_litellm_budgettrack ./cmd/authbridge-proxy/
 ```
 
 The registration file uses the standard build-tag pattern:
 
 ```go
-//go:build !exclude_plugin_litellm_budgettrack
+//go:build include_plugin_litellm_budgettrack
 
 package main
 

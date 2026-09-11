@@ -1,4 +1,4 @@
-//go:build !exclude_plugin_toolprune
+//go:build include_plugin_toolprune
 
 package main
 

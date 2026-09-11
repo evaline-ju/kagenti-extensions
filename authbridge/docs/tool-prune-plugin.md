@@ -329,5 +329,6 @@ it happens on the change and then the prefix is stable again.
 
 ## Build tag
 
-Compiled in by default; exclude with `-tags exclude_plugin_toolprune`. The
-`authbridge-lite` image excludes it along with the other non-auth plugins.
+Opt-in like every plugin: link it with `-tags include_plugin_toolprune`. It is in
+the `local` and `full` profiles but not `lite`, which carries only the
+credential/identity plugins. See `authbridge/scripts/profile-tags`.

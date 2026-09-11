@@ -13,14 +13,16 @@ binaries with shared auth logic in `authlib/`:
   proxies. Compiles in every plugin by default (jwt-validation, token-exchange,
   a2a-parser, mcp-parser, inference-parser, opa, sparc, ibac, token-broker,
   tool-prune).
-  **Every** plugin is excludable via `-tags exclude_plugin_<name>` — one
-  `plugins_<name>.go` file per plugin, gated by `//go:build !exclude_plugin_<name>`;
-  `main.go` imports no plugin package directly. **Exception:** `context-guru` is
+  **Every** plugin is opt-in via `-tags include_plugin_<name>` — one
+  `plugins_<name>.go` file per plugin, gated by `//go:build include_plugin_<name>`;
+  `main.go` imports no plugin package directly, and a build with no tags registers
+  no plugins at all. Tag sets come from `authbridge/scripts/profile-tags`, one
+  profile per shipped artifact. **Note:** `context-guru` is
   **opt-IN** (`//go:build include_plugin_contextguru`, not compiled by default),
   because its embedded engine pulls a large transitive dependency set; build with
   `-tags include_plugin_contextguru` to link it in.
 - `cmd/authbridge-envoy/` — envoy-sidecar mode. ext_proc gRPC server hooked
-  into Envoy. Full plugin set. The `exclude_plugin_ibac` tag applies here too.
+  into Envoy. Built from the `envoy` profile.
 - `cmd/authbridge-cpex/` — proxy-sidecar mode, full plugin set plus the
   `cpex` plugin. Built with `-tags cpex` and requires cgo (CGO_ENABLED=1):
   it links `libcpex_ffi.a` from a pinned CPEX release to route hooks through
@@ -28,8 +30,8 @@ binaries with shared auth logic in `authlib/`:
   version lives in `cmd/authbridge-cpex/CPEX_FFI_VERSION`. The other
   binaries are pure-Go (CGO_ENABLED=0) and do not import the cpex package.
 - `authbridge-lite` (**image, not a separate binary**) — `cmd/authbridge-proxy`
-  built with `exclude_plugin_*` tags for a trimmed plugin set (see
-  `authbridge/scripts/lite-tags` for the definition). For size-optimized
+  built with the `lite` profile, a sidecar minimum (see
+  `authbridge/scripts/profile-tags` for the definition). For size-optimized
   deployments that don't need protocol-aware session events.
 
 Each binary is hardcoded to its deployment shape; mode is no longer selected
@@ -45,7 +47,7 @@ ships in variants that mirror the container images:
 | Variant | Tarball name shape | Matches |
 |---|---|---|
 | unqualified (default plugins) | `authbridge-proxy_<ver>_<os>_<arch>.tar.gz` | `authbridge` image |
-| `-lite` (trimmed plugin set — see `authbridge/scripts/lite-tags`) | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
+| `-lite` (sidecar-minimum plugin set — see `authbridge/scripts/profile-tags`) | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
 | `-sessionbudget` (default + opt-in session-budget) | `authbridge-proxy-sessionbudget_<ver>_<os>_<arch>.tar.gz` | no image today |
 
 One variant per opt-in plugin currently offered for try-out (today:
@@ -411,11 +413,11 @@ make load-image                     # Uses KIND_CLUSTER_NAME env var (default: r
 cd ..
 podman build -f cmd/authbridge-proxy/Dockerfile -t authbridge:latest .       # proxy-sidecar (default)
 podman build -f cmd/authbridge-envoy/Dockerfile -t authbridge-envoy:latest . # envoy-sidecar
-# authbridge-lite: the proxy Dockerfile built with a trimmed plugin
-# set derived from plugin source by scripts/lite-tags.
-LITE_TAGS=$(go -C scripts/lite-tags run .)
+# authbridge-lite: the proxy Dockerfile built with the `lite` profile
+# from scripts/profile-tags. GO_BUILD_TAGS is required — plugins are all
+# opt-in, so omitting it registers none.
 podman build -f cmd/authbridge-proxy/Dockerfile \
-  --build-arg GO_BUILD_TAGS="${LITE_TAGS}" \
+  --build-arg GO_BUILD_TAGS="$(go -C scripts/profile-tags run . lite)" \
   -t authbridge-lite:latest .
 kind load docker-image authbridge:latest       --name rossoctl
 kind load docker-image authbridge-envoy:latest --name rossoctl
@@ -555,7 +557,7 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 
 ### Go (authlib, cmd/authbridge-{proxy,envoy}, demo-app)
 - Go 1.25
-- Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy}/` (mode-specific binaries that wire listeners + plugins together). The `authbridge-lite` image is the proxy binary built with `exclude_plugin_*` tags, not a separate module.
+- Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy}/` (mode-specific binaries that wire listeners + plugins together). The `authbridge-lite` image is the proxy binary built with the `lite` profile, not a separate module.
 - `authbridge/go.work` workspace links the modules for local development
 - Logging with `log/slog`; the binaries log under their own name (`authbridge-proxy`, `authbridge-envoy`). Note the `authbridge-lite` image runs the `authbridge-proxy` binary, so it logs as `authbridge-proxy`.
 - gRPC ext-proc using `envoyproxy/go-control-plane` types (in `authlib/listener/extproc`)

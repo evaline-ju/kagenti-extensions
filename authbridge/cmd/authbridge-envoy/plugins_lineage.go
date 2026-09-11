@@ -1,4 +1,4 @@
-//go:build !exclude_plugin_lineage
+//go:build include_plugin_lineage
 
 package main
 

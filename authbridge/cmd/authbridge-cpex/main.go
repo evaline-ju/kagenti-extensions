@@ -45,20 +45,10 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/forwardproxy"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/reverseproxy"
-
 	// Plugins — same set as authbridge-proxy, plus the cpex plugin
 	// which lives behind //go:build cpex. The cpex import only fires
 	// in this binary's build; pure-Go binaries (authbridge-proxy,
 	// authbridge-envoy, authbridge-lite) don't import it.
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/a2aparser"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/cpex"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/ibac"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/inferenceparser"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/mcpparser"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/sparc"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenbroker"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange"
 )
 
 func main() {

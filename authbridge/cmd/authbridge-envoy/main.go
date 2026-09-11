@@ -1,14 +1,16 @@
 // Package main is the envoy-sidecar authbridge binary: an ext_proc
 // gRPC server intended to run alongside Envoy in a sidecar (or as a
-// shared service hooked into Envoy's external_processor filter), with
-// the full plugin set compiled in (jwt-validation, token-exchange,
-// a2a-parser, mcp-parser, inference-parser).
+// shared service hooked into Envoy's external_processor filter).
+//
+// It links only the plugins its build tags name — nothing is compiled in
+// by default. Every plugin has its own plugins_<name>.go file gated by
+// `//go:build include_plugin_<name>`, and this binary's set is the
+// `envoy` profile in authbridge/scripts/profile-tags. main.go imports no
+// plugin package directly.
 //
 // Mode is hardcoded to envoy-sidecar; YAML configs that specify a
 // different mode are rejected at boot. For proxy-sidecar mode (HTTP
-// forward/reverse proxies, no Envoy), use cmd/authbridge-proxy — which
-// also produces the size-optimized authbridge-lite image when built
-// with exclude_plugin_* tags.
+// forward/reverse proxies, no Envoy), use cmd/authbridge-proxy.
 package main
 
 import (
@@ -46,17 +48,8 @@ import (
 	// HTTP proxies).
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/extproc"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
-
 	// Plugins. Auth gates first, then the protocol parsers that
 	// supply session-event context for abctl.
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/a2aparser"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/inferenceparser"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/mcpparser"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/opa"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/sparc"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenbroker"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange"
 )
 
 func main() {

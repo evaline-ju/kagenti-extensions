@@ -40,13 +40,13 @@ Two container images are published:
 |-------|----------|
 | `authbridge` | proxy-sidecar combined: authbridge-proxy binary + bundled spiffe-helper |
 | `authbridge-envoy` | envoy-sidecar combined: Envoy + ext_proc + bundled spiffe-helper |
-| `authbridge-lite` | `authbridge-proxy` built with `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed plugin set). A build variant, not a separate binary |
+| `authbridge-lite` | `authbridge-proxy` built with the `lite` profile (see `authbridge/scripts/profile-tags`), a sidecar minimum. A build variant, not a separate binary |
 
 | Mode | Image | Use Case | How It Works |
 |------|-------|----------|-------------|
 | `proxy-sidecar` (default) | `authbridge` | HTTP_PROXY-based forward + reverse proxies | Agent routes outbound traffic through forward proxy; reverse proxy validates inbound JWTs |
 | `envoy-sidecar` | `authbridge-envoy` | Transparent interception via iptables | Envoy intercepts all traffic, delegates auth to authbridge via ext_proc gRPC |
-| `lite` | `authbridge-lite` | The `authbridge-proxy` binary built with `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed plugin set) | For size-constrained deployments that don't need protocol-aware session events |
+| `lite` | `authbridge-lite` | The `authbridge-proxy` binary built with the `lite` profile (see `authbridge/scripts/profile-tags`) | For size-constrained deployments that don't need protocol-aware session events |
 
 The operator resolves the mode per workload from `AgentRuntime.Spec.AuthBridgeMode` → namespace ConfigMap → deprecated `rossoctl.io/authbridge-mode` annotation → cluster default (`proxy-sidecar`). See operator#361.
 
@@ -418,41 +418,50 @@ This creates target clients, audience scopes, and assigns scopes to the agent.
 
 ## Build-tag plugin selection
 
-Downstream distributions and custom deployments can exclude specific
-plugins at build time using Go build tags. The default build (no tags)
-includes every plugin — existing Dockerfiles, CI, and Makefiles keep
-working with zero changes.
+Every plugin is opt-in. A binary links exactly the plugins its build tags name,
+so an artifact's contents are its tag list and nothing more. **A build with no
+tags registers no plugins**, and will reject any config that names one with
+`unknown plugin "..." (registered: [])`.
 
-### Available tags
+Tag sets are not written by hand. `authbridge/scripts/profile-tags` holds one
+declarative profile per shipped artifact and emits its tags:
 
-| Tag | Plugin excluded | Effect |
-|-----|----------------|--------|
-| `exclude_plugin_ibac` | IBAC (Intent-Based Access Control) | Removes the LLM-judge plugin and its runtime dependencies |
+| Profile | Artifact | Plugins |
+|---------|----------|---------|
+| `local` | desktop `authbridge-proxy` | the three parsers + `tool-prune` |
+| `full` | `authbridge` image, Kubernetes proxy-sidecar | all thirteen |
+| `lite` | `authbridge-lite` image | sidecar minimum: jwt-validation, token-exchange, litellm-budget-track, static-inject |
+| `envoy` | `authbridge-envoy` image | envoy-sidecar set |
+| `cpex` | `authbridge-cpex` image | cpex set |
+
+`context-guru` and `session-budget` belong to no profile — both are heavy
+(roughly 16 MiB and 6 MiB respectively) and are linked only on request.
 
 ### Usage
 
 **Go build:**
 
 ```bash
-# Default — all plugins included (same as today)
-go build ./cmd/authbridge-proxy
+# Desktop set
+go build -tags "$(go -C scripts/profile-tags run . local)" ./cmd/authbridge-proxy
 
-# Exclude IBAC
-go build -tags exclude_plugin_ibac ./cmd/authbridge-proxy
+# Everything a Kubernetes sidecar ships
+go build -tags "$(go -C scripts/profile-tags run . full)" ./cmd/authbridge-proxy
+
+# A profile plus one optional plugin
+go build -tags "$(go -C scripts/profile-tags run . full),include_plugin_sessionbudget" \
+  ./cmd/authbridge-proxy
 ```
 
 **Docker build:**
 
 ```bash
-# Default — all plugins
-docker build -f cmd/authbridge-proxy/Dockerfile .
-
-# Exclude IBAC
-docker build --build-arg GO_BUILD_TAGS=exclude_plugin_ibac \
+docker build --build-arg GO_BUILD_TAGS="$(go -C scripts/profile-tags run . full)" \
   -f cmd/authbridge-proxy/Dockerfile .
 ```
 
-Multiple tags can be combined with commas: `-tags "exclude_plugin_ibac,exclude_plugin_foo"`.
+Tags combine with commas. Go does **not** error on a tag that matches nothing, so
+a typo silently drops a plugin — prefer a profile name over a hand-written list.
 
 ### Adding build tags to a new plugin
 
@@ -461,27 +470,34 @@ To make a plugin excludable:
 1. Create a `plugins_<name>.go` file in each `cmd/` binary that imports the plugin:
 
 ```go
-//go:build !exclude_plugin_<name>
+//go:build include_plugin_<name>
 
 package main
 
 import _ "github.com/rossoctl/cortex/authbridge/authlib/plugins/<name>"
 ```
 
-2. Remove the corresponding `_ "...plugins/<name>"` import from that binary's `main.go`.
+2. Never import a plugin package from `main.go`. An unconditional import cannot be
+   excluded by any tag, and nothing reports that.
 
-3. Add the tag to the table above.
+3. Name the plugin in every profile that should carry it, in
+   `scripts/profile-tags/profiles.go` — or add it to `optional` if it deliberately
+   ships in none. A plugin in neither fails the accounting guard.
 
-The build constraint `!exclude_plugin_<name>` means the file is included by
-default. Passing `-tags exclude_plugin_<name>` excludes it, which prevents the
-plugin package from being imported and compiled into the binary.
+4. Avoid a filename whose suffix is a GOOS or GOARCH token. `plugins_sparc.go`
+   carries an implicit `GOARCH=sparc` constraint and compiles on no normal
+   machine, silently dropping the plugin — which is why the sparc plugin's file is
+   `plugins_sparcplugin.go`. A guard test enforces this.
+
+The build constraint `include_plugin_<name>` means the file is compiled in only
+when `-tags include_plugin_<name>` is passed.
 
 ## Component Documentation
 
 - [authlib](authlib/README.md) — Shared auth building blocks (Go library)
 - [cmd/authbridge-proxy](cmd/authbridge-proxy/) — proxy-sidecar binary (default mode, full plugin set)
 - [cmd/authbridge-envoy](cmd/authbridge-envoy/) — envoy-sidecar binary (Envoy + ext_proc, full plugin set)
-- `authbridge-lite` image — `cmd/authbridge-proxy` built with `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed plugin set); a build variant, not a separate binary
+- `authbridge-lite` image — `cmd/authbridge-proxy` built with the `lite` profile (see `authbridge/scripts/profile-tags`); a build variant, not a separate binary
 - [proxy-init](proxy-init/README.md) — iptables init container (envoy-sidecar mode only)
 - [docs/](docs/) — framework architecture and plugin author references
 

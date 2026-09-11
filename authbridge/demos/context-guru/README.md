@@ -108,9 +108,9 @@ prints the agent's answer + the byte/token gain from the sidecar session API (`:
 
 ## Build integration
 
-context-guru is **opt-in**: unlike the other plugins (compiled in by default,
-dropped via `-tags exclude_plugin_*`), it is linked only when the binary is built
-with `-tags include_plugin_contextguru`. Its embedded engine pulls a large
+context-guru belongs to **no shipped profile**: every plugin is opt-in, and this
+one is not named by any profile in `authbridge/scripts/profile-tags`, so it is
+linked only when the binary is built with `-tags include_plugin_contextguru`. Its embedded engine pulls a large
 transitive dependency set (bifrost/core, tiktoken-go, tree-sitter grammars,
 starlark), so the default `authbridge-proxy`/`authbridge-envoy` binaries stay lean
 and a deployment that doesn't want compaction never pays for it.

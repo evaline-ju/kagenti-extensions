@@ -41,14 +41,18 @@ for the walkthrough.
 
 ### Build-tag plugin exclusion
 
-Some plugins can be excluded at build time using Go build tags. Their
-side-effect import lives in a dedicated `plugins_<name>.go` file (in
-each `cmd/` binary) gated by `//go:build !exclude_plugin_<name>`.
-The default build (no tags) includes everything.
+Every plugin is selected at build time using Go build tags. Its side-effect
+import lives in a dedicated `plugins_<name>.go` file (in each `cmd/` binary)
+gated by `//go:build include_plugin_<name>`. A build with no tags registers
+no plugins and rejects any config that names one, so artifacts are built from
+named profiles in `authbridge/scripts/profile-tags`:
 
-| Tag | Plugin excluded |
-|-----|----------------|
-| `exclude_plugin_ibac` | `ibac` |
+| Profile | Carries |
+|---------|---------|
+| `local` | the three parsers + `tool-prune` |
+| `full` | all thirteen non-optional plugins |
+| `lite` | jwt-validation, token-exchange, litellm-budget-track, static-inject |
+| `envoy`, `cpex` | the sets those binaries shipped historically |
 
 See the [authbridge README](../../README.md#build-tag-plugin-selection)
 for usage examples and instructions for tagging additional plugins.

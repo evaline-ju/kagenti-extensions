@@ -113,16 +113,25 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      # The authbridge-lite image is this same authbridge-proxy binary built
-      # with the trimmed plugin set derived by authbridge/scripts/lite-tags.
-      # Build AND test that tag set on every PR — build.yaml only exercises
-      # it on tag/main pushes, and this guards against lite-only regressions.
-      - name: Build + test lite variant
-        if: matrix.binary == 'authbridge-proxy'
+      # Every plugin is opt-in, so the Build and Test steps above exercise a
+      # binary with NO plugins linked. That is worth compiling on its own — it is
+      # what a caller who forgets -tags gets — but the shipped artifacts are the
+      # profiles, so build AND test each one here. build.yaml only exercises them
+      # on tag/main pushes; this catches a profile-only regression on the PR.
+      - name: Build + test each shipped profile
+        if: matrix.binary == 'authbridge-proxy' || matrix.binary == 'authbridge-envoy'
         run: |
-          TAGS=$(go -C ../../scripts/lite-tags run .)
-          go build -v -tags "$TAGS" ./...
-          go test -v -race -cover -tags "$TAGS" ./...
+          case "${{ matrix.binary }}" in
+            authbridge-proxy) profiles="local full lite" ;;
+            authbridge-envoy) profiles="envoy" ;;
+          esac
+          for profile in ${profiles}; do
+            echo "::group::profile ${profile}"
+            TAGS=$(go -C ../../scripts/profile-tags run . "${profile}")
+            go build -v -tags "${TAGS}" ./...
+            go test -race -cover -tags "${TAGS}" ./...
+            echo "::endgroup::"
+          done
 
       - name: Test
         run: go test -v -race -cover ./...
