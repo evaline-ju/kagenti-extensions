@@ -171,3 +171,38 @@ func TestMultiplier_EndpointNeedsNoModels(t *testing.T) {
 		t.Fatalf("rejected a multiplier-only endpoint: %v", err)
 	}
 }
+
+// Two behaviours the docs now promise, both surprising enough that they must be pinned:
+// a configured catch-all outranks a shipped host-specific rule (provenance decides before
+// specificity), and an explicit 1.0 is how an operator drops a shipped discount.
+func TestMultiplier_ConfiguredCatchAllOutranksShippedSpecific(t *testing.T) {
+	one := 1.0
+	nine := 0.9
+	shipped := "ete-litellm.ai-models.vpc-int.res.ibm.com"
+
+	// Control: shipped rule alone gives 0.76.
+	base := mustBuild(t, nil)
+	if f, prov := base.multiplierFor(shipped); f != 0.76 || prov != ProvBundled {
+		t.Fatalf("shipped rule = %v/%v, want 0.76/bundled", f, prov)
+	}
+
+	t.Run("catch-all replaces it", func(t *testing.T) {
+		tab := mustBuild(t, &Config{Endpoints: []EndpointConfig{{Hosts: []string{"*"}, Multiplier: &nine}}})
+		f, prov := tab.multiplierFor(shipped)
+		if f != 0.9 || prov != ProvConfigured {
+			t.Errorf("multiplierFor(%s) = %v/%v, want 0.9/configured — a configured catch-all must outrank the shipped specific rule", shipped, f, prov)
+		}
+	})
+
+	t.Run("explicit 1.0 drops the shipped discount", func(t *testing.T) {
+		tab := mustBuild(t, &Config{Endpoints: []EndpointConfig{{Hosts: []string{shipped}, Multiplier: &one}}})
+		if f, _ := tab.multiplierFor(shipped); f != 1 {
+			t.Errorf("multiplierFor = %v, want 1 — an explicit 1.0 must cancel the shipped factor", f)
+		}
+		// And the rates must come back at list, not scaled.
+		rates, prov := tab.Resolve(shipped, "claude-opus-5", 0)
+		if got := perM(rates, TierInput); got != 5 {
+			t.Errorf("input = %v/Mtok, want the unscaled 5 (prov %v)", got, prov)
+		}
+	})
+}

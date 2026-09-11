@@ -20,7 +20,7 @@ func TestDescribe_ShowsBundledRowsAndMultipliers(t *testing.T) {
 		if r.Model == "claude-opus-5" {
 			sawOpus5 = true
 			if r.InputPerMillion != 5.00 {
-				t.Errorf("opus-5 input = %v, want 5.00 (list, undscaled in the raw table)", r.InputPerMillion)
+				t.Errorf("opus-5 input = %v, want 5.00 (list, unscaled in the raw table)", r.InputPerMillion)
 			}
 			if r.Provenance != "bundled" {
 				t.Errorf("opus-5 provenance = %q, want bundled", r.Provenance)
@@ -117,4 +117,39 @@ func mustBuild(t *testing.T, c *Config) *Table {
 		t.Fatal(err)
 	}
 	return tab
+}
+
+// The bundled table ships long-context thresholds (four sonnet models at 200k), and
+// EffectiveFor resolves at prompt size 0 — so without a marker the host view quotes a
+// rate a long-context request will not be charged. That is precisely the failure this
+// package exists to remove, so it must not be reintroduced by the tool built to inspect
+// it.
+func TestDescribe_EffectiveFlagsLongContextTiers(t *testing.T) {
+	reg := NewRegistry(mustBuild(t, nil))
+	eff := reg.EffectiveFor("api.anthropic.com")
+
+	var withThresholds, checked int
+	for _, m := range eff.Models {
+		if m.LongContextAbove > 0 {
+			withThresholds++
+			if m.Model == "claude-sonnet-4-5" {
+				checked++
+				if m.LongContextAbove != 200_000 {
+					t.Errorf("sonnet-4-5 LongContextAbove = %d, want 200000", m.LongContextAbove)
+				}
+			}
+		}
+	}
+	if withThresholds == 0 {
+		t.Error("no model reports a long-context tier, but the bundled table ships four")
+	}
+	if checked == 0 {
+		t.Error("claude-sonnet-4-5 does not report its 200k tier")
+	}
+	// A model without thresholds must not claim one.
+	for _, m := range eff.Models {
+		if m.Model == "claude-opus-5" && m.LongContextAbove != 0 {
+			t.Errorf("opus-5 reports a long-context tier at %d; it has none", m.LongContextAbove)
+		}
+	}
 }

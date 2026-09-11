@@ -8,9 +8,9 @@ import (
 
 // MultiplierRule scales every rate that resolves for an endpoint.
 //
-// It exists because a gateway discount is a SCALAR, not a rate card. The IBM LiteLLM
-// gateways bill a uniform fraction of vendor list — measured at exactly 0.7600 across
-// three models and all four tiers, twelve figures agreeing to four decimal places.
+// It exists because a gateway discount is a SCALAR, not a rate card. Some gateways bill a
+// uniform fraction of vendor list — one was measured at exactly 0.7600 across three
+// models and all four tiers, twelve figures agreeing to four decimal places.
 // Expressing that as twelve copied numbers has two costs a multiplier does not:
 //
 //   - Twelve chances to fumble a decimal place, in a file nothing validates against
@@ -25,8 +25,9 @@ type MultiplierRule struct {
 	Host string
 	// Factor multiplies each resolved rate. 1.0 means list.
 	Factor float64
-	// Prov records where the factor came from, so a scaled figure reports the weaker
-	// of its two sources rather than claiming to be operator-verified.
+	// Prov records where the factor came from. A scaled figure reports the STRONGER of
+	// its two sources, and it also ranks these rules against each other — an operator's
+	// factor for an endpoint beats the shipped one. See Resolve for why stronger.
 	Prov Provenance
 }
 
@@ -58,28 +59,26 @@ func (m MultiplierRule) validate(what string) error {
 	return nil
 }
 
-// scale returns r with every set rate, and every threshold override, multiplied.
+// scale returns r with every set rate multiplied.
 //
-// Thresholds scale too. Missing that would make a discounted gateway correct below
-// its long-context breakpoint and wrong above it — the kind of split that shows up as
-// an unexplained jump in reported cost on long sessions.
+// Long-context premiums scale too, and the ORDERING is what makes that true rather than
+// anything in this function: Resolve flattens with At(promptTotal) first, so whichever
+// threshold applies has already been folded into Base by the time scale runs. Missing
+// that would leave a discounted gateway correct below its breakpoint and wrong above it,
+// which shows up as an unexplained jump in reported cost on long sessions.
+//
+// An earlier version also walked r.Thresholds here. That branch was unreachable —
+// proven by putting a panic in it and watching the whole suite pass, including the test
+// that appeared to cover it — so it was removed rather than left to imply a guarantee it
+// never provided. If a caller ever scales UNFLATTENED rates, it needs adding back with a
+// test that reaches it.
 func (r Rates) scale(f float64) Rates {
 	if f == 1 {
 		return r
 	}
-	out := Rates{Set: r.Set}
+	out := Rates{Set: r.Set, Thresholds: r.Thresholds}
 	for i := range r.Base {
 		out.Base[i] = r.Base[i] * f
-	}
-	if len(r.Thresholds) > 0 {
-		out.Thresholds = make([]ContextThreshold, len(r.Thresholds))
-		for i, th := range r.Thresholds {
-			scaled := ContextThreshold{AbovePromptTokens: th.AbovePromptTokens, Set: th.Set}
-			for j := range th.Rate {
-				scaled.Rate[j] = th.Rate[j] * f
-			}
-			out.Thresholds[i] = scaled
-		}
 	}
 	return out
 }

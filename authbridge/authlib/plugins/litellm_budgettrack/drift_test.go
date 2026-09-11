@@ -3,6 +3,7 @@ package litellm_budgettrack
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -112,5 +113,38 @@ func TestDrift_SilentOnStreamedResponses(t *testing.T) {
 
 	if got := buf.String(); got != "" {
 		t.Errorf("warned on a streamed response, which has no authoritative cost: %s", got)
+	}
+}
+
+// The dedup key is (endpoint, model), and BOTH halves come off the request: Host is a
+// client-supplied header and the model is a body field. An unbounded map keyed on those
+// grows for as long as a caller varies them, in a long-lived sidecar, for a diagnostic.
+func TestDrift_SeenMapIsBounded(t *testing.T) {
+	p := configurePriced(t, 1e9, map[pricing.Tier]float64{
+		pricing.TierInput:  2e-6,
+		pricing.TierOutput: 2e-6,
+	})
+	var buf bytes.Buffer
+	p.SetDriftLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	for i := 0; i < maxDriftKeys*3; i++ {
+		h := http.Header{}
+		h.Set("Content-Type", "application/json")
+		h.Set(responseCostHeader, "0.002")
+		pctx := &pipeline.Context{Host: fmt.Sprintf("gw-%d.internal", i), ResponseHeaders: h}
+		pricedInference(pctx, 1000, 0, 0, 1000)
+		p.OnResponseFrame(context.Background(), pctx, nil, true)
+	}
+
+	p.drift.mu.Lock()
+	n := len(p.drift.seen)
+	p.drift.mu.Unlock()
+	if n > maxDriftKeys {
+		t.Errorf("seen holds %d keys, cap is %d", n, maxDriftKeys)
+	}
+	// And it must say it stopped, exactly once — silently going quiet would read as
+	// "the drift was fixed".
+	if c := strings.Count(buf.String(), "no longer reporting"); c != 1 {
+		t.Errorf("cap notice appeared %d times, want exactly 1", c)
 	}
 }

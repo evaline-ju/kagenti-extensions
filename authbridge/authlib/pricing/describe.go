@@ -1,6 +1,9 @@
 package pricing
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // This file exists because a config file cannot answer the question operators
 // actually have.
@@ -62,6 +65,16 @@ type EffectiveRates struct {
 	Model      string `json:"model"`
 	Provenance string `json:"provenance"`
 	Unpriced   bool   `json:"unpriced,omitempty"`
+
+	// LongContextAbove is the prompt-token count past which DIFFERENT rates apply, or
+	// 0 when this model has none.
+	//
+	// The rates below are the below-threshold ones, because that is what a request of
+	// unknown size is charged and EffectiveFor resolves at prompt size 0. Without this
+	// field the view quotes a figure a long-context request will not be charged — the
+	// same silent-wrong-number failure this package exists to remove, reintroduced by
+	// the tool built to inspect it. The bundled table ships four such models.
+	LongContextAbove int `json:"longContextAbove,omitempty"`
 
 	InputPerMillion      float64 `json:"inputPerMillion,omitempty"`
 	CacheWritePerMillion float64 `json:"cacheWritePerMillion,omitempty"`
@@ -165,6 +178,11 @@ func (t *Table) EffectiveFor(host string) Effective {
 	for _, m := range models {
 		rates, prov := t.Resolve(host, m, 0)
 		e := EffectiveRates{Model: m, Provenance: prov.String(), Unpriced: prov == ProvNone}
+		// Read from the UNFLATTENED row: Resolve has already folded the applicable
+		// threshold into Base, so the thresholds are only visible on the row itself.
+		if lo := t.lowestThresholdFor(host, m); lo > 0 {
+			e.LongContextAbove = lo
+		}
 		if prov != ProvNone {
 			e.InputPerMillion = perM(rates, TierInput)
 			e.CacheWritePerMillion = perM(rates, TierCacheWrite)
@@ -191,4 +209,36 @@ func (r *Registry) EffectiveFor(host string) Effective {
 		return Effective{Host: host, Multiplier: 1}
 	}
 	return r.tab.Load().EffectiveFor(host)
+}
+
+// lowestThresholdFor reports the smallest long-context breakpoint on the row that would
+// win for this endpoint and model, or 0 if it has none.
+//
+// Resolves the row the same way Resolve does, then reads its thresholds before
+// flattening — which is the only place they survive.
+func (t *Table) lowestThresholdFor(endpoint, model string) int {
+	if t == nil {
+		return 0
+	}
+	forms := modelNameForms(strings.ToLower(strings.TrimSpace(model)))
+	var best *row
+	for i := range t.rows {
+		r := &t.rows[i]
+		if !matchHost(r.host, endpoint) || !r.model.match(forms) {
+			continue
+		}
+		if best == nil || r.prov > best.prov || (r.prov == best.prov && r.spec.beats(best.spec)) {
+			best = r
+		}
+	}
+	if best == nil {
+		return 0
+	}
+	lowest := 0
+	for _, th := range best.rates.Thresholds {
+		if th.AbovePromptTokens > 0 && (lowest == 0 || th.AbovePromptTokens < lowest) {
+			lowest = th.AbovePromptTokens
+		}
+	}
+	return lowest
 }

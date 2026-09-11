@@ -46,6 +46,20 @@ func TestRunPricing_HostViewShowsTheDiscountApplied(t *testing.T) {
 	if !strings.Contains(got, "vendor list scaled") {
 		t.Errorf("output does not explain that rates are scaled: %s", got)
 	}
+	// The bundled table gives sonnet-4-5 a 200k long-context tier, and the host view
+	// resolves at prompt size 0 — so its row MUST carry the marker and the footnote
+	// must give the breakpoint. Quoting a below-threshold rate as if it were the only
+	// rate is the exact failure this package exists to remove.
+	if row := modelRow(t, got, "claude-sonnet-4-5"); !strings.Contains(row, "*") {
+		t.Errorf("sonnet-4-5 row %q is not marked as having long-context tiers", row)
+	}
+	if !strings.Contains(got, "long-context rates apply above 200,000 prompt tokens") {
+		t.Errorf("no long-context footnote with a breakpoint: %s", got)
+	}
+	// A model without a tier must not be marked.
+	if row := modelRow(t, got, "claude-opus-5"); strings.Contains(row, "*") {
+		t.Errorf("opus-5 row %q is marked, but it has no long-context tier", row)
+	}
 }
 
 func TestRunPricing_UnscaledEndpointSaysSo(t *testing.T) {
@@ -57,10 +71,36 @@ func TestRunPricing_UnscaledEndpointSaysSo(t *testing.T) {
 	if !strings.Contains(got, "no gateway discount") {
 		t.Errorf("expected the no-discount note: %s", got)
 	}
-	// Vendor list for opus-5 input.
-	if !strings.Contains(got, "5") {
-		t.Errorf("expected list rates: %s", got)
+	// UNSCALED vendor list for opus-5: 5 in, 25 out. Asserted as a whole row, because
+	// "5" alone also matches the model name "claude-opus-5" and so proves nothing — and
+	// specifically NOT the discounted 3.8/19, which is what a multiplier leaking onto
+	// api.anthropic.com would print here.
+	row := modelRow(t, got, "claude-opus-5")
+	for _, want := range []string{"5", "25"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("opus-5 row %q missing list rate %q", row, want)
+		}
 	}
+	for _, unwanted := range []string{"3.8", "19"} {
+		if strings.Contains(row, unwanted) {
+			t.Errorf("opus-5 row %q carries the discounted rate %q on an undiscounted endpoint", row, unwanted)
+		}
+	}
+}
+
+// modelRow returns one model's line, so a rate assertion is scoped to that model rather
+// than matching any digit anywhere in the table.
+func modelRow(t *testing.T, out, model string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		// Exact first field, not Contains: "claude-opus-5" is a prefix of
+		// "claude-opus-5-1", and a substring match would silently accept the wrong row.
+		if f := strings.Fields(line); len(f) > 0 && f[0] == model {
+			return line
+		}
+	}
+	t.Fatalf("no %s row in:\n%s", model, out)
+	return ""
 }
 
 func TestRunPricing_TableViewListsRowsAndDiscounts(t *testing.T) {

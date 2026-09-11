@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,7 +53,10 @@ Flags:
 
 	u := strings.TrimSuffix(*statsURL, "/") + "/pricing/table"
 	if *host != "" {
-		u += "?host=" + *host
+		// Escaped, not concatenated: a host is operator-supplied and a "&" or "#" in
+		// it would silently truncate the parameter, so the proxy would answer for the
+		// wrong endpoint — a wrong answer presented as a right one.
+		u += "?" + url.Values{"host": {*host}}.Encode()
 	}
 	body, err := fetchPricing(u)
 	if err != nil {
@@ -96,6 +101,7 @@ type effective struct {
 		Model      string  `json:"model"`
 		Provenance string  `json:"provenance"`
 		Unpriced   bool    `json:"unpriced"`
+		LongCtx    int     `json:"longContextAbove"`
 		In         float64 `json:"inputPerMillion"`
 		CW         float64 `json:"cacheWritePerMillion"`
 		CR         float64 `json:"cacheReadPerMillion"`
@@ -112,12 +118,22 @@ func renderEffective(body []byte, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Rates in effect for %s\n\n", e.Host)
 	fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s  %s\n", "model", "input", "cache-wr", "cache-rd", "output", "provenance")
 	fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s\n", "", "$/Mtok", "$/Mtok", "$/Mtok", "$/Mtok")
+	var breakpoints []int
 	for _, m := range e.Models {
 		if m.Unpriced {
 			fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s  %s\n", m.Model, "-", "-", "-", "-", "UNPRICED")
 			continue
 		}
-		fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s  %s\n", m.Model,
+		name := m.Model
+		// Marked, because the figures on this row are the BELOW-threshold ones. An
+		// unmarked row would quote a long session a rate it is not charged, which is
+		// the failure the pricing work exists to remove — it must not come back in
+		// the tool built to inspect it.
+		if m.LongCtx > 0 {
+			name += " *"
+			breakpoints = append(breakpoints, m.LongCtx)
+		}
+		fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s  %s\n", name,
 			rate(m.In), rate(m.CW), rate(m.CR), rate(m.Out), m.Provenance)
 	}
 	if e.Multiplier != 1 {
@@ -125,6 +141,10 @@ func renderEffective(body []byte, stdout, stderr io.Writer) int {
 			e.Multiplier, e.MultiplierFrom)
 	} else {
 		fmt.Fprintf(stdout, "\n  no gateway discount applies to this endpoint; rates above are vendor list\n")
+	}
+	if len(breakpoints) > 0 {
+		fmt.Fprintf(stdout, "  * long-context rates apply above %s prompt tokens — the figures above are the\n"+
+			"    below-threshold ones, so a longer request costs MORE than shown\n", breakpointList(breakpoints))
 	}
 	return 0
 }
@@ -198,4 +218,39 @@ func short(s string) string {
 	return s
 }
 
-var _ = os.Stdout
+// breakpointList renders the distinct long-context breakpoints, largest last.
+//
+// Distinct, because four models sharing one 200k threshold should read "200,000", not
+// the same number four times.
+func breakpointList(ns []int) string {
+	sort.Ints(ns)
+	var out []string
+	for i, n := range ns {
+		if i > 0 && n == ns[i-1] {
+			continue
+		}
+		out = append(out, commas(n))
+	}
+	return strings.Join(out, "/")
+}
+
+// commas groups a token count for reading: 200000 is hard to size at a glance, 200,000
+// is not, and these numbers only ever appear in prose meant for a human.
+func commas(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	lead := len(s) % 3
+	if lead > 0 {
+		b.WriteString(s[:lead])
+	}
+	for i := lead; i < len(s); i += 3 {
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}

@@ -410,6 +410,50 @@ Some gateways already have a discount shipped with Cortex and need no configurat
 all — `abctl pricing --host <gateway>` says which, and shows the rates in effect with
 their provenance. The `multiplier` you set outranks any shipped one.
 
+**Provenance decides before specificity, so a catch-all you configure beats a specific
+rule Cortex ships.** These are not equivalent:
+
+```yaml
+pricing:
+  endpoints:
+    - hosts: ["*"]            # applies to EVERY endpoint, including ones with a
+      multiplier: 0.9         # shipped discount — 0.9 replaces their 0.76
+```
+
+That is deliberate: a configured factor means an operator checked their bill, and a rule
+compiled into a binary should never silently win over that. But it does mean a catch-all
+written for one gateway quietly reprices the rest. Scope the `hosts` list unless you mean
+every endpoint, and check the result with `abctl pricing --host <gateway>`.
+
+To drop a shipped discount for an endpoint without scaling it, set `multiplier: 1.0`
+explicitly — that is a configured rule of 1.0, which outranks the shipped factor and
+leaves the rates at vendor list. Omitting `multiplier` does NOT do this; it leaves the
+shipped rule in force.
+
+**Measuring your gateway's factor.** You do not have to be told it — a LiteLLM gateway
+reports what it charged, so the factor is one division:
+
+```sh
+# Non-streamed, so the gateway settles the cost before replying. A streamed response
+# reports 0 in that header by design, which is why this cannot be learned from live
+# agent traffic.
+curl -sD - -o /dev/null "$GATEWAY/v1/messages" \
+  -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}' \
+  | grep -i x-litellm-response-cost-original
+```
+
+Divide that by what the same token counts cost at list (`abctl pricing` shows the list
+rates; the response's `usage` block gives the counts). Repeat for one more model: a single
+factor across both means a uniform discount and `multiplier` is the whole answer, while
+figures that disagree mean the prices are negotiated per model and need the `models`
+block below.
+
+Cortex checks this for you as traffic flows. When a non-streamed response carries a
+settled cost that disagrees with the modelled figure by more than 5%, `litellm-budget-track`
+warns once per endpoint and model with both numbers and the ratio — so a stale or missing
+factor announces itself rather than quietly misreporting spend.
+
 Reach for per-model rates only when a gateway's prices are genuinely negotiated per
 model rather than derived from list:
 

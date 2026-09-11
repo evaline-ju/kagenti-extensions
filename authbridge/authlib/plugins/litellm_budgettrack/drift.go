@@ -18,6 +18,18 @@ import (
 // actionable and would train an operator to ignore the line.
 const driftTolerance = 0.05
 
+// maxDriftKeys bounds the dedup set.
+//
+// Both halves of the key come off the request — Host is a client-supplied header, the
+// model is a body field — so an unbounded map grows for as long as a caller varies them,
+// in a process designed to run for weeks, to serve a diagnostic. 256 distinct
+// endpoint/model pairs is far past any real deployment and long past the point where the
+// operator has been told their rate table is wrong.
+//
+// At the cap reporting STOPS rather than dropping the dedup: continuing to warn without
+// dedup would turn a bounded-memory problem into an unbounded-log one.
+const maxDriftKeys = 256
+
 // driftReporter warns, once per endpoint and model, when the rate table disagrees with
 // what the gateway actually charged.
 //
@@ -30,9 +42,10 @@ const driftTolerance = 0.05
 // Once per (endpoint, model), not per request: an agent makes thousands of calls, and a
 // per-request warning would bury every other line in the log and get filtered out.
 type driftReporter struct {
-	mu   sync.Mutex
-	seen map[string]struct{}
-	log  *slog.Logger
+	mu     sync.Mutex
+	seen   map[string]struct{}
+	capped bool
+	log    *slog.Logger
 }
 
 func (d *driftReporter) logger() *slog.Logger {
@@ -87,6 +100,20 @@ func (p *BudgetTrack) checkDrift(pctx *pipeline.Context, authoritative float64) 
 	}
 	if _, dup := p.drift.seen[key]; dup {
 		p.drift.mu.Unlock()
+		return
+	}
+	if len(p.drift.seen) >= maxDriftKeys {
+		alreadyCapped := p.drift.capped
+		p.drift.capped = true
+		log := p.drift.logger()
+		p.drift.mu.Unlock()
+		if !alreadyCapped {
+			// Said once, because going quiet without a word would read as "the drift
+			// stopped" — the opposite of what happened.
+			log.Warn("pricing: no longer reporting rate-table drift",
+				"reason", fmt.Sprintf("hit the %d endpoint/model limit", maxDriftKeys),
+				"fix", "`abctl pricing --host <endpoint>` still shows the rates in effect")
+		}
 		return
 	}
 	p.drift.seen[key] = struct{}{}
