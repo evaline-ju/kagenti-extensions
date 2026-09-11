@@ -23,7 +23,21 @@ type Entry struct {
 // Table is an immutable resolved rate table. Build one with NewTable; never
 // mutate one that is live, because a Registry hands the same pointer to every
 // concurrent reader.
-type Table struct{ rows []row }
+type Table struct {
+	rows []row
+	// mults are endpoint multiplier rules, most specific first. Kept separate from
+	// rows because a multiplier is a property of the ENDPOINT, not of a (host, model)
+	// pair: one rule scales every model that gateway serves, including ones no row
+	// names explicitly.
+	mults []multRule
+}
+
+type multRule struct {
+	host   string
+	spec   specificity
+	factor float64
+	prov   Provenance
+}
 
 type row struct {
 	host  string // lower-cased; "" or "*" means any
@@ -229,7 +243,7 @@ func (s specificity) beats(o specificity) bool {
 
 // NewTable compiles entries into a table, rejecting rows that cannot mean
 // anything useful.
-func NewTable(entries []Entry) (*Table, error) {
+func NewTable(entries []Entry, mults ...MultiplierRule) (*Table, error) {
 	t := &Table{rows: make([]row, 0, len(entries))}
 	// Duplicate rows were silently first-wins, so a config listing the same model
 	// twice under one endpoint had one of its rates quietly ignored — and which one
@@ -310,7 +324,55 @@ func NewTable(entries []Entry) (*Table, error) {
 			},
 		})
 	}
+	for i, m := range mults {
+		where := fmt.Sprintf("pricing multiplier[%d]", i)
+		if m.Host != "" {
+			where = fmt.Sprintf("pricing multiplier for host %q", m.Host)
+		}
+		if err := m.validate(where); err != nil {
+			return nil, err
+		}
+		switch m.Prov {
+		case ProvBundled, ProvDiscovered, ProvConfigured:
+		default:
+			return nil, fmt.Errorf("%s: provenance %d is not a table level", where, int(m.Prov))
+		}
+		host := strings.ToLower(m.Host)
+		t.mults = append(t.mults, multRule{
+			host:   host,
+			factor: m.Factor,
+			prov:   m.Prov,
+			spec: specificity{
+				namedHost: !anyHost(host),
+				exactHost: !anyHost(host) && (isIPv6Literal(host) || !strings.ContainsAny(host, globMeta)),
+				hostLen:   hostRankLen(host),
+				pattern:   host,
+			},
+		})
+	}
 	return t, nil
+}
+
+// multiplierFor returns the most specific matching factor and its provenance.
+//
+// Ranked by the same host rules as rate rows — a named host beats a catch-all, an exact
+// host beats a glob, a longer glob beats a shorter one — with provenance deciding first
+// so an operator's explicit factor outranks the shipped one for the same endpoint.
+func (t *Table) multiplierFor(endpoint string) (float64, Provenance) {
+	var best *multRule
+	for i := range t.mults {
+		m := &t.mults[i]
+		if !matchHost(m.host, endpoint) {
+			continue
+		}
+		if best == nil || m.prov > best.prov || (m.prov == best.prov && m.spec.beats(best.spec)) {
+			best = m
+		}
+	}
+	if best == nil {
+		return 1, ProvNone
+	}
+	return best.factor, best.prov
 }
 
 // Resolve returns the rates for one (endpoint, model) pair and where they came
@@ -339,7 +401,23 @@ func (t *Table) Resolve(endpoint, model string, promptTotal int) (Rates, Provena
 	if best == nil {
 		return Rates{}, ProvNone
 	}
-	return best.rates.At(promptTotal), best.prov
+	rates, prov := best.rates.At(promptTotal), best.prov
+	// A scaled figure reports the STRONGER of its two sources: bundled x bundled stays
+	// bundled, but either half configured makes the result configured.
+	//
+	// Because "bundled" is the label that means "you have told us nothing about this
+	// endpoint, expect it to be wrong" — it is what drives WarnIfUnpinned and what
+	// abctl annotates. An operator who set a multiplier HAS told us about their
+	// gateway, so reporting bundled would send them to pin rates they have effectively
+	// already pinned. The weaker reading looks more conservative and is in fact less
+	// informative.
+	if f, mprov := t.multiplierFor(endpoint); f != 1 {
+		rates = rates.scale(f)
+		if mprov > prov {
+			prov = mprov
+		}
+	}
+	return rates, prov
 }
 
 var _ Resolver = (*Table)(nil)
