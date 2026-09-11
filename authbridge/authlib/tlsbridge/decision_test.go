@@ -220,6 +220,12 @@ func TestNewDecision_RejectsUnusablePatterns(t *testing.T) {
 }
 
 // window returns the remaining skip window for host, for asserting on backoff.
+//
+// A test helper rather than a method on SkipSet: nothing in the proxy needs to read a
+// window — it only ever asks Contains — so a method would be non-test code that nothing
+// calls. There WAS such a method briefly, left behind when an exported accessor was
+// unexported instead of deleted; it sat dead until review caught it, because no linter
+// here reports unused methods.
 func window(t *testing.T, s *SkipSet, host string) time.Duration {
 	t.Helper()
 	s.mu.RLock()
