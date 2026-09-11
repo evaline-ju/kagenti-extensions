@@ -162,6 +162,54 @@ type SessionEvent struct {
 	// previously required the proxy log, the CA's NotBefore and a process
 	// listing — none of which the timeline hinted at.
 	TunnelReason TunnelReason
+
+	// HTTPMethod and HTTPPath are the request's HTTP verb and its
+	// query-stripped path, copied from the pipeline context at record
+	// time.
+	//
+	// They exist because an event Cortex could not parse as A2A, MCP or
+	// inference previously reached the timeline carrying only a host: the
+	// operator saw that *something* went to an address, with no way to tell
+	// a token refresh from an object download. The verb and path are the
+	// cheapest thing that distinguishes them, and both were already on the
+	// context — they simply never made it onto the event.
+	//
+	// Distinct from the Method on A2AExtension and MCPExtension, which is a
+	// protocol-level method name ("message/stream", "tools/call") and not an
+	// HTTP verb; hence the prefix on these two.
+	//
+	// HTTPPath is empty on an opaque tunnel, where the bytes are never parsed
+	// as HTTP and there is no request line to read: recordTunnelOpened pairs
+	// that empty path with a synthetic CONNECT. A blank path on a tunnel row
+	// is therefore correct rather than missing plumbing. Both are empty when
+	// the listener left the context fields unset — ext_authz never populates
+	// Method, though it records no session events either.
+	//
+	// A query string is always stripped before the path gets here (see
+	// pipeline.Context.Path), so query-borne credentials never reach the
+	// timeline. What is recorded is the DECODED path, not the raw request
+	// target: every listener mode runs the target through net/url, so
+	// "/x/..%2f..%2fetc/passwd" is stored as "/x/../../etc/passwd". That is
+	// deliberate cross-mode parity (net/http decodes identically for the proxy
+	// listeners), but it means the timeline does not preserve how a caller
+	// encoded a path — read it as the resolved path, and do not infer from it
+	// that no encoded-traversal attempt was made. A secret embedded in a path SEGMENT does survive, because
+	// nothing can tell it from a resource id — a bot token or a webhook path
+	// lands here verbatim. That is the same exposure Host already carried on
+	// this unauthenticated surface, which serves request bodies besides; it is
+	// worth knowing before these events are exported off-box.
+	//
+	// HTTPPath duplicates the per-invocation Invocation.Path (serialized as
+	// "path"), deliberately: both are copies of the same Context.Path, so the
+	// two keys cannot disagree. They differ in when they are THERE, which is
+	// why this one exists. HTTPPath is on every event the listener recorded
+	// from a parsed HTTP request, whether or not a plugin ran; Invocation.Path
+	// appears only where some plugin recorded an invocation. An event can
+	// carry invocations and no HTTPPath (an opaque tunnel that ran a gate), so
+	// a consumer that wants "the path of this request" should read HTTPPath
+	// and treat Invocation.Path as per-invocation context.
+	HTTPMethod string
+	HTTPPath   string
 }
 
 // TunnelReason is why an opaque tunnel stayed opaque.
@@ -308,6 +356,11 @@ type sessionEventWire struct {
 	// key, and a new abctl against an old proxy sees "" and renders exactly what it
 	// renders today.
 	TunnelReason TunnelReason `json:"tunnelReason,omitempty"`
+	// omitempty for the same skew reason as TunnelReason above: an old abctl
+	// ignores keys it does not know, and a new abctl against a proxy that
+	// predates these fields sees "" and renders what it renders today.
+	HTTPMethod string `json:"httpMethod,omitempty"`
+	HTTPPath   string `json:"httpPath,omitempty"`
 }
 
 func (e SessionEvent) MarshalJSON() ([]byte, error) {
@@ -330,6 +383,8 @@ func (e SessionEvent) MarshalJSON() ([]byte, error) {
 		TLS:          e.TLS,
 		Tunnel:       e.Tunnel,
 		TunnelReason: e.TunnelReason,
+		HTTPMethod:   e.HTTPMethod,
+		HTTPPath:     e.HTTPPath,
 	})
 }
 
@@ -360,6 +415,8 @@ func (e *SessionEvent) UnmarshalJSON(data []byte) error {
 		TLS:          w.TLS,
 		Tunnel:       w.Tunnel,
 		TunnelReason: w.TunnelReason,
+		HTTPMethod:   w.HTTPMethod,
+		HTTPPath:     w.HTTPPath,
 	}
 	return nil
 }

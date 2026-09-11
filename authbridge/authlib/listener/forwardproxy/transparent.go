@@ -93,6 +93,7 @@ func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 		Method:    http.MethodConnect, // synthetic: opaque tunnel, parity with handleConnect
 		Scheme:    "tcp",              // marker: bytes are opaque, not HTTP
 		Host:      host,
+		Path:      "", // no request line to read one from; explicit, as in handleConnect
 		Headers:   http.Header{},
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
@@ -188,6 +189,12 @@ func (s *Server) recordTunnelOpened(pctx *pipeline.Context, reason pipeline.Tunn
 		Plugins:     plugins,
 		Identity:    pipeline.SnapshotIdentity(pctx),
 		Host:        pctx.Host,
+		// Method is CONNECT — real on a proxied CONNECT, synthetic on a
+		// transparently redirected connection — and Path is empty: the bytes
+		// are opaque, so there is no request line to read one from. A blank
+		// path on this row is the accurate answer, not a gap.
+		HTTPMethod: pctx.Method,
+		HTTPPath:   pctx.Path,
 		// Explicit opaque-tunnel marker so abctl can fold this CONNECT into
 		// the decrypted inner request without inferring "tunnel" from shape.
 		Tunnel: true,
