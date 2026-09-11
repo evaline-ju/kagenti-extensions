@@ -37,12 +37,23 @@ type fixture struct {
 	path      string
 	reqBody   []byte
 
-	// upstreamStatus / upstreamBody are what the httptest backend serves
-	// on the proxy path, and what the parity harness synthesizes into the
-	// extproc ResponseHeaders/ResponseBody messages. Zero status skips
-	// the response phase entirely (deny-at-request scenarios).
-	upstreamStatus int
-	upstreamBody   []byte
+	// upstreamStatus / upstreamBody / upstreamContentType are what the
+	// httptest backend serves on the proxy path, and what the parity
+	// harness synthesizes into the extproc ResponseHeaders/ResponseBody
+	// messages. Zero status skips the response phase entirely (deny-at-
+	// request scenarios). Empty content-type defaults to application/json.
+	upstreamStatus      int
+	upstreamBody        []byte
+	upstreamContentType string
+}
+
+// contentType returns the fixture's response content-type or a sensible
+// default. Kept as a helper so both driver paths stay compact.
+func (f fixture) contentType() string {
+	if f.upstreamContentType != "" {
+		return f.upstreamContentType
+	}
+	return "application/json"
 }
 
 // buildSpyPipeline routes construction through plugins.BuildWithDeps
@@ -63,6 +74,12 @@ func spyEntry(name string, cfg spyConfig) config.PluginEntry {
 // (Host casing, timestamps, RequestID, Duration, TLS, Identity) are
 // excluded — expanding coverage there is a follow-up fixture pass.
 type observation struct {
+	// PipelineRan is false when the listener rejected the request before
+	// the pipeline (e.g. request body too large). Overflow fixtures then
+	// assert wire status only and skip session-event comparisons.
+	PipelineRan bool
+	WireStatus  int // captured from the transport, not from the session event
+
 	Phase       string
 	StatusCode  int
 	Error       *errorSummary
@@ -251,7 +268,7 @@ func runExtproc(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *obser
 				ResponseHeaders: &extprocv3.HttpHeaders{
 					Headers: makeHeaders(
 						":status", fmt.Sprintf("%d", f.upstreamStatus),
-						"content-type", "application/json",
+						"content-type", f.contentType(),
 						"content-length", fmt.Sprintf("%d", len(f.upstreamBody)),
 					),
 				},
@@ -284,7 +301,33 @@ func runExtproc(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *obser
 		}
 	}
 
-	return observe(t, store, f.direction, wantPhase)
+	return finalizeObservation(observe(t, store, f.direction, wantPhase), extprocWireStatus(stream))
+}
+
+// extprocWireStatus reads the HTTP status from an ImmediateResponse if
+// one was sent, else 0. Pipeline-ran is inferred from observe(): a
+// session event exists iff the pipeline reached the recording site.
+func extprocWireStatus(stream *mockStream) int {
+	for _, r := range stream.responses {
+		if imm := r.GetImmediateResponse(); imm != nil && imm.Status != nil {
+			return int(imm.Status.Code)
+		}
+	}
+	return 0
+}
+
+// finalizeObservation stamps PipelineRan + WireStatus onto an
+// observation, creating a stub when observe() found no session event
+// (pipeline refused the request pre-record). This keeps the overflow
+// fixture assertable — a nil return would collapse "no event" with
+// "listener bailed."
+func finalizeObservation(obs *observation, wireStatus int) *observation {
+	if obs == nil {
+		return &observation{PipelineRan: false, WireStatus: wireStatus}
+	}
+	obs.PipelineRan = true
+	obs.WireStatus = wireStatus
+	return obs
 }
 
 // --- reverseproxy driver -------------------------------------------------
@@ -306,7 +349,7 @@ func runReverseProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", f.contentType())
 		w.WriteHeader(f.upstreamStatus)
 		_, _ = w.Write(f.upstreamBody)
 	}))
@@ -352,7 +395,7 @@ func runReverseProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Errorf("reverseproxy: fixture %q asked for deny but upstream was reached", f.name)
 	}
 
-	return observe(t, store, pipeline.Inbound, wantPhase)
+	return finalizeObservation(observe(t, store, pipeline.Inbound, wantPhase), resp.StatusCode)
 }
 
 // --- forwardproxy driver -------------------------------------------------
@@ -374,7 +417,7 @@ func runForwardProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", f.contentType())
 		w.WriteHeader(f.upstreamStatus)
 		_, _ = w.Write(f.upstreamBody)
 	}))
@@ -425,7 +468,7 @@ func runForwardProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Errorf("forwardproxy: fixture %q asked for deny but upstream was reached", f.name)
 	}
 
-	return observe(t, store, pipeline.Outbound, wantPhase)
+	return finalizeObservation(observe(t, store, pipeline.Outbound, wantPhase), resp.StatusCode)
 }
 
 // --- construction-only helpers -------------------------------------------

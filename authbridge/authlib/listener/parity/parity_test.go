@@ -87,6 +87,80 @@ func TestParity_OutboundDenyOnRequest(t *testing.T) {
 	assertParity(t, f, pipeline.SessionDenied, outboundListeners)
 }
 
+// TestParity_ReadsBodyBufferedJSON: with ReadsBody set, both listeners
+// present the plugin with the same request and response body bytes,
+// despite extproc's two-phase handshake vs. the proxies' in-process
+// buffering.
+func TestParity_ReadsBodyBufferedJSON(t *testing.T) {
+	f := fixture{
+		name:      "reads-body-buffered-json",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginAStreaming, spyConfig{
+			ReadsBody:            true,
+			RecordRequestBody:    true,
+			RecordResponseFrames: true,
+		})},
+		method:         "POST",
+		path:           "/parity/echo",
+		reqBody:        []byte(`{"prompt":"hello"}`),
+		upstreamStatus: 200,
+		upstreamBody:   []byte(`{"reply":"ok"}`),
+	}
+	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
+}
+
+// TestParity_ReadsBodySSE: an SSE upstream yields the same accumulated
+// frame bytes and exactly one terminal frame on every listener. Frame
+// counts differ (extproc buffered, proxies streamed) — that's fine and
+// intentionally not asserted.
+func TestParity_ReadsBodySSE(t *testing.T) {
+	sse := []byte(
+		"data: {\"type\":\"message_start\"}\n\n" +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n" +
+			"data: [DONE]\n\n",
+	)
+	f := fixture{
+		name:      "reads-body-sse",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginAStreaming, spyConfig{
+			ReadsBody:            true,
+			RecordResponseFrames: true,
+		})},
+		method:              "POST",
+		path:                "/parity/sse",
+		upstreamStatus:      200,
+		upstreamBody:        sse,
+		upstreamContentType: "text/event-stream",
+	}
+	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
+}
+
+// TestParity_InboundRequestBodyOverflow: a body exceeding both
+// listeners' 1 MiB cap must be rejected before the pipeline runs, with
+// the same wire status. Forwardproxy's 10 MiB cap is a documented
+// divergence; outbound-overflow parity belongs to a follow-up.
+func TestParity_InboundRequestBodyOverflow(t *testing.T) {
+	big := make([]byte, (1<<20)+1) // 1 MiB + 1 byte — one over the cap
+	for i := range big {
+		big[i] = 'x'
+	}
+	f := fixture{
+		name:      "inbound-request-body-overflow",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginA, spyConfig{
+			ReadsBody:         true,
+			RecordRequestBody: true, // spy would record IF it got called; it must not
+		})},
+		method:  "POST",
+		path:    "/parity/big",
+		reqBody: big,
+		// upstreamStatus deliberately 0: the listener must reject
+		// before ever reaching an upstream.
+	}
+	assertParity(t, f, pipeline.SessionRequest, inboundListeners)
+}
+
 // TestParity_RequiresLaterOrderingRejected: each listener's
 // construction must reject a RequiresLater violation (dependency at a
 // LOWER index than the plugin naming it; contract requires HIGHER).
@@ -174,6 +248,18 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 // observationDiff returns the first field-level disagreement, or ""
 // when both agree on every parity-comparable field.
 func observationDiff(a, b *observation) string {
+	if a.PipelineRan != b.PipelineRan {
+		return fmt.Sprintf("PipelineRan: %v vs %v", a.PipelineRan, b.PipelineRan)
+	}
+	// WireStatus is meaningful only when the pipeline refused pre-run;
+	// on the success path extproc has no HTTP transport to report from.
+	// Session-event fields cover parity for the run-and-recorded case.
+	if !a.PipelineRan {
+		if a.WireStatus != b.WireStatus {
+			return fmt.Sprintf("WireStatus: %d vs %d", a.WireStatus, b.WireStatus)
+		}
+		return ""
+	}
 	if a.Phase != b.Phase {
 		return "Phase: " + a.Phase + " vs " + b.Phase
 	}
