@@ -86,11 +86,8 @@ func TestRunPricing_UnscaledEndpointSaysSo(t *testing.T) {
 	if f[4] != "25" {
 		t.Errorf("output column = %q, want the list rate 25", f[4])
 	}
-	// And specifically NOT the discounted figures, which is what a multiplier leaking
-	// onto api.anthropic.com would print here.
-	if f[1] == "3.8" || f[4] == "19" {
-		t.Errorf("opus-5 carries discounted rates on an undiscounted endpoint: %q", f)
-	}
+	// No separate "and not 3.8/19" check: the two equalities above already exclude every
+	// other value, discounted ones included.
 }
 
 // modelRow returns one model's line, so a rate assertion is scoped to that model rather
@@ -150,15 +147,51 @@ func TestRunPricing_TableViewShowsLongContextOverrides(t *testing.T) {
 	if code := runPricing([]string{"--stats-url", realStatServer(t)}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	got := out.String()
-	if !strings.Contains(got, "above 200,000 tok:") {
-		t.Errorf("no long-context override line in the raw view:\n%s", tail(got))
+	// By column, not by Contains: a Contains on "        6 " would depend on the %9s
+	// padding and would fail on a width change while the rate itself was correct.
+	//
+	// Override columns: "above", <breakpoint>, "tok:", then the four rates.
+	f := overrideAfter(t, out.String(), "claude-sonnet-4-5")
+	if len(f) != 7 {
+		t.Fatalf("override line has %d columns, want 7: %q", len(f), f)
 	}
-	// The override rate itself, not just the breakpoint: sonnet-4-5's 200k input
-	// premium is 6.00/Mtok at list, and the raw view is unscaled.
-	if !strings.Contains(got, "        6 ") {
-		t.Errorf("override line does not carry the premium rate 6:\n%s", tail(got))
+	if f[1] != "200,000" {
+		t.Errorf("breakpoint = %q, want 200,000", f[1])
 	}
+	// sonnet-4-5's 200k premium at list: 6.00 input, 22.50 output. The raw view is
+	// unscaled, so these are list and not the discounted figures.
+	if f[3] != "6" {
+		t.Errorf("override input = %q, want the premium 6", f[3])
+	}
+	if f[6] != "22.5" {
+		t.Errorf("override output = %q, want the premium 22.5", f[6])
+	}
+}
+
+// overrideAfter returns the long-context continuation line that follows a model's row in
+// the raw view, as columns.
+//
+// Positional on purpose: the continuation line only means anything attached to the row
+// above it, so finding it by scanning for "above" anywhere would not prove it landed on
+// the right model.
+func overrideAfter(t *testing.T, out, model string) []string {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		// Raw view columns: endpoint, model, four rates, provenance.
+		if f := strings.Fields(line); len(f) > 1 && f[1] == model {
+			if i+1 >= len(lines) {
+				t.Fatalf("%s is the last line; no override line follows it", model)
+			}
+			nf := strings.Fields(lines[i+1])
+			if len(nf) == 0 || nf[0] != "above" {
+				t.Fatalf("no override line after the %s row, got %q", model, lines[i+1])
+			}
+			return nf
+		}
+	}
+	t.Fatalf("no %s row in:\n%s", model, tail(out))
+	return nil
 }
 
 func tail(s string) string {
