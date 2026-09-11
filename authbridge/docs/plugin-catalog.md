@@ -368,15 +368,50 @@ pricing:
 service name and its external alias, bill identically, and repeating the whole models
 block per host invites the two copies to drift. Each host becomes its own table row.
 
+`multiplier` scales every rate that resolves for those hosts, including tiers and
+long-context thresholds. Absent means 1.0. A multiplier-only endpoint needs no `models`
+block. The factor is capped at 10, because `multiplier: 76` for `0.76` inflates every
+figure a hundredfold and reads as plausible in a config file.
+
+**Inspecting what is in effect.** No config file can answer this: the figures a request
+is charged come from your `pricing:` section *plus* the table compiled into the binary
+*plus* any shipped gateway discount. Two views:
+
+```
+abctl pricing                      every row, unscaled
+abctl pricing --host <gateway>     what that endpoint is charged, discount applied
+```
+
+Both are served by `GET /pricing/table[?host=]` on the diagnostic listener, beside
+`/config` and `/reload/status`.
+
 **Rates are scoped per endpoint**, which a per-plugin table could not express: the
 same model bills differently on a discounted gateway than on the vendor endpoint,
 and only the request's target host distinguishes them.
 
 ### Pinning a gateway that bills below list
 
-This is the one piece of configuration most deployments need, so it is worth stating
-plainly. The bundled table ships vendor-list prices; a gateway that bills below list is
-overstated until you pin it. Eight lines:
+The bundled table ships vendor-list prices, so a gateway that bills below list is
+overstated until Cortex knows the discount. **Most gateways bill a uniform fraction of
+list, and for those the whole answer is one scalar:**
+
+```yaml
+pricing:
+  endpoints:
+    - hosts: ["my-gateway.example.com"]
+      multiplier: 0.76        # a FRACTION of list, so 0.76 is a 24% discount
+```
+
+One number rather than twelve, and it **tracks upstream repricing**: the gateway's price
+is derived from list, so refreshing the bundled table moves both together. A copied rate
+card freezes today's numbers and goes stale silently.
+
+Some gateways already have a discount shipped with Cortex and need no configuration at
+all — `abctl pricing --host <gateway>` says which, and shows the rates in effect with
+their provenance. The `multiplier` you set outranks any shipped one.
+
+Reach for per-model rates only when a gateway's prices are genuinely negotiated per
+model rather than derived from list:
 
 ```yaml
 pricing:

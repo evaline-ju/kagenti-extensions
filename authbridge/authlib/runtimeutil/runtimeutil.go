@@ -121,9 +121,10 @@ func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) (*http
 // in a goroutine, and returns the server for graceful shutdown. A bind failure
 // is returned so the caller can decide how to handle it (the mains log.Fatalf);
 // a serve-time failure after bind is logged.
-func StartStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler, addr string) (*observe.StatServer, error) {
+func StartStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus, pricingTable http.Handler, addr string) (*observe.StatServer, error) {
 	srv := observe.NewStatServer(addr, cfgProvider, statsProvider,
-		observe.WithReloadStatus(reloadStatus))
+		observe.WithReloadStatus(reloadStatus),
+		observe.WithPricingTable(pricingTable))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err

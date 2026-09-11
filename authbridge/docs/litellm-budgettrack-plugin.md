@@ -333,3 +333,30 @@ The cost event gained a `provenance` field, **additively**: the original
 consumer that knows only those four still decodes. `source` is retained rather than
 replaced — it says which *path* priced the request (gateway header vs token counts),
 where `provenance` says how much to trust the rates.
+
+
+## Drift detection
+
+A non-streamed response carries both the gateway's own settled cost and the token counts,
+so the modelled figure can be checked against the real one for free. When they diverge by
+more than 5%, the plugin warns once per endpoint and model:
+
+```
+WARN pricing: the rate table disagrees with what the gateway charged
+     endpoint=gw.internal model=claude-opus-5 modelled_usd=0.085000
+     gateway_usd=0.064600 ratio=1.316x
+     effect=overstating every request this table prices, including streamed ones
+     fix=set pricing.endpoints[].multiplier for this endpoint ...
+```
+
+That matters because **streamed responses have no authoritative cost** — the gateway
+reports 0 in the header by design, since the total is unknown when headers are sent. So a
+misconfigured rate table is invisible on exactly the traffic an agent generates. The
+occasional non-streamed call is the only place the error is observable, and this is what
+looks.
+
+Once per endpoint and model, not per request: an agent makes thousands of calls, and a
+per-request warning would bury every other line in the log.
+
+The ledger always uses the authoritative figure. Drift is a diagnostic about the rate
+table, never a reason to distrust the gateway's own number.

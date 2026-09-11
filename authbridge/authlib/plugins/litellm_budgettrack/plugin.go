@@ -97,6 +97,9 @@ type BudgetTrack struct {
 	// rates is the process rate table, injected before Configure. Read only
 	// through costOf, which guards the nil interface.
 	rates pricing.Resolver
+
+	// drift reports when the table disagrees with the gateway's own figure.
+	drift driftReporter
 }
 
 // SetPricingResolver implements pricing.ResolverConsumer.
@@ -269,6 +272,11 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	}
 	switch {
 	case cost > 0:
+		if source == costevent.SourceGatewayHeader {
+			// Only a header cost is authoritative. Comparing a modelled figure against
+			// itself would always agree and say nothing.
+			p.checkDrift(pctx, cost)
+		}
 		if total, ok := p.accumulate(cost); ok {
 			p.emitCost(pctx, cost, source, total, provenance)
 		}

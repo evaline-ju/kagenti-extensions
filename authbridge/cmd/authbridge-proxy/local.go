@@ -114,6 +114,27 @@ tls_bridge:
   # explicit empty list means "intercept everything". Never list an inference
   # endpoint: skipping one silently removes the parsing and the token savings,
   # with no error to notice it by.
+# Cost accounting. Nothing here is required.
+#
+# Rates come from a table built into the binary -- vendor list, refreshed each
+# release -- scaled by any gateway discount Cortex knows about. To see what is
+# actually in effect, including where each figure came from:
+#
+#   abctl pricing --host <your-gateway>
+#
+# Gateways matching a shipped rule already have their discount applied and need
+# nothing here. If yours is not one of them and it bills a fraction of list, say
+# so once: one scalar tracks upstream repricing, where a copied rate card freezes
+# today's numbers and goes stale with nothing to say it has.
+#
+# pricing:
+#   endpoints:
+#     - hosts: ["my-gateway.example.com"]
+#       multiplier: 0.80          # a FRACTION of list, so 0.80 is a 20% discount
+#
+# For a gateway whose prices are genuinely negotiated per model rather than
+# derived from list, give rates instead of a multiplier -- see
+# docs/plugin-catalog.md.
 pipeline:
   outbound:
     plugins:
