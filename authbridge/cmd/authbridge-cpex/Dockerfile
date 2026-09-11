@@ -139,10 +139,23 @@ ENV CGO_LDFLAGS="-L/libs -lcpex_ffi -lm"
 # the version go.mod asks for" — keeps the base image pin stable across
 # toolchain bumps.
 ENV GOTOOLCHAIN=auto
+# Plugins are all opt-in, so the plugin set has to be named explicitly: build
+# with GO_BUILD_TAGS from the `cpex` profile (authbridge/scripts/profile-tags).
+# The `cpex` tag itself is separate and always required — it gates this binary's
+# own main package — so it is appended rather than left to the caller. Building
+# with `cpex` alone would produce a binary that registers no plugins.
+ARG GO_BUILD_TAGS=""
+# Required, not optional: `cpex` alone registers no plugins, which is never a
+# valid artifact. Fail here rather than shipping an image that crash-loops on the
+# first config naming a plugin.
+RUN test -n "${GO_BUILD_TAGS}" || { \
+      echo "GO_BUILD_TAGS is required: plugins are opt-in and the cpex tag alone registers none." >&2; \
+      echo "Pass a profile, e.g. --build-arg GO_BUILD_TAGS=\"\$(go -C scripts/profile-tags run . cpex)\"" >&2; \
+      exit 1; }
 # -trimpath drops absolute build paths for reproducibility; -s -w drop the
 # Go symbol table + DWARF (panic traces still resolve via pclntab).
 RUN cd cmd/authbridge-cpex && \
-    go build -tags cpex -trimpath -ldflags="-s -w" -o /authbridge-cpex .
+    go build -tags "cpex${GO_BUILD_TAGS:+,${GO_BUILD_TAGS}}" -trimpath -ldflags="-s -w" -o /authbridge-cpex .
 
 # ---------- Stage 3: runtime ----------------------------------------
 # Alpine — same base + digest the authbridge-proxy / -lite images pin. The

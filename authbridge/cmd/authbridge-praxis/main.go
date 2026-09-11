@@ -19,9 +19,9 @@ import (
 	// Only HTTP listeners are compiled in: no extproc/extauthz
 	// (no gRPC, no envoy types).
 	// Plugins are wired via per-plugin plugins_<name>.go files, each gated
-	// by `//go:build !exclude_plugin_<name>`. main.go imports no plugin
-	// package directly, so every plugin can be dropped at build time. The
-	// authbridge-lite image excludes all but jwt-validation + token-exchange.
+	// by `//go:build include_plugin_<name>`. main.go imports no plugin
+	// package directly. This binary defines no plugins_*.go files of its own,
+	// so it registers no plugins (see authbridge/scripts/profile-tags).
 )
 
 // version is the authbridge-proxy build version, overridden at release time

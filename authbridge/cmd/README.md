@@ -5,7 +5,7 @@ Each binary is hardcoded to a single deployment shape; the YAML `mode:`
 field must match the binary or boot fails. Mode is selected at build time
 by which binary you run, not at runtime via a flag. The `authbridge-lite`
 image is a build variant of the proxy binary (proxy Dockerfile +
-`exclude_plugin_*` tags), not a separate binary.
+the `lite` profile's tags), not a separate binary.
 
 ## Binaries
 
@@ -13,7 +13,7 @@ image is a build variant of the proxy binary (proxy Dockerfile +
 |---|---|---|---|---|
 | [`authbridge-proxy/`](authbridge-proxy/) | `proxy-sidecar` (default) | HTTP forward + reverse proxies | full (jwt-validation, token-exchange, a2a-parser, mcp-parser, inference-parser) | `ghcr.io/rossoctl/cortex/authbridge` |
 | [`authbridge-envoy/`](authbridge-envoy/) | `envoy-sidecar` | gRPC ext_proc on `:9090` (hooked into Envoy) | full | `ghcr.io/rossoctl/cortex/authbridge-envoy` |
-| `authbridge-lite` _(build variant of `authbridge-proxy`)_ | `proxy-sidecar` | HTTP forward + reverse proxies | lite — `authbridge-proxy` built with `exclude_plugin_*` tags for a trimmed plugin set (see [`../scripts/lite-tags`](../scripts/lite-tags)) | `ghcr.io/rossoctl/cortex/authbridge-lite` |
+| `authbridge-lite` _(build variant of `authbridge-proxy`)_ | `proxy-sidecar` | HTTP forward + reverse proxies | lite — `authbridge-proxy` built with the `lite` profile, a sidecar minimum (see [`../scripts/profile-tags`](../scripts/profile-tags)) | `ghcr.io/rossoctl/cortex/authbridge-lite` |
 | [`abctl/`](abctl/) | n/a | n/a | n/a | not published — local TUI for the Session Events API |
 
 Each binary directory contains `main.go`, `go.mod`/`go.sum`,
@@ -83,8 +83,8 @@ local single-host setups typically pin them all to `127.0.0.1`. `authbridge-prox
   `authbridge-envoy`. Requires the [`proxy-init`](../proxy-init/)
   iptables init container.
 - **Size-constrained, no protocol-aware events needed**: use the
-  `authbridge-lite` image — the `authbridge-proxy` binary built with
-  `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed
-  plugin set). Same listener layout, but without parsers/OPA — abctl
+  `authbridge-lite` image — the `authbridge-proxy` binary built with the
+  `lite` profile from `authbridge/scripts/profile-tags` (a sidecar
+  minimum). Same listener layout, but without parsers/OPA — abctl
   will only see denial events and basic auth-level invocations, not
   full A2A/MCP/Inference protocol context.

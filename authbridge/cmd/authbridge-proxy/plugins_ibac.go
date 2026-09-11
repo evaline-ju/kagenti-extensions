@@ -1,4 +1,4 @@
-//go:build !exclude_plugin_ibac
+//go:build include_plugin_ibac
 
 package main
 

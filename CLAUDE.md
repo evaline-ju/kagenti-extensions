@@ -98,7 +98,7 @@ cortex/
 │   │   ├── Dockerfile        #     envoy-sidecar combined image
 │   │   └── entrypoint.sh
 │   │                        #   (the authbridge-lite image is this proxy
-│   │                        #    binary built with exclude_plugin_* tags)
+│   │                        #    binary built with the `lite` profile's tags)
 │   ├── proxy-init/           #   iptables init container (envoy-sidecar + proxy-sidecar enforce-redirect modes)
 │   │   ├── init-iptables.sh
 │   │   ├── Dockerfile.init
@@ -127,7 +127,7 @@ cortex/
 **Binaries:**
 - `cmd/authbridge-proxy/` — proxy-sidecar mode (default): HTTP forward + reverse proxies, full plugin set (jwt-validation, token-exchange, a2a-parser, mcp-parser, inference-parser). No Envoy / no gRPC.
 - `cmd/authbridge-envoy/` — envoy-sidecar mode: ext_proc gRPC server hooked into Envoy, full plugin set.
-- `authbridge-lite` (image, **not** a separate binary) — `cmd/authbridge-proxy` built with `exclude_plugin_*` tags so only jwt-validation + token-exchange compile in (OPA + parsers dropped), for size-optimized deployments. Individual plugins live in `cmd/authbridge-proxy/plugins_<name>.go` files gated by `//go:build !exclude_plugin_<name>`.
+- `authbridge-lite` (image, **not** a separate binary) — `cmd/authbridge-proxy` built with the `lite` profile, a sidecar minimum (jwt-validation, token-exchange, litellm-budget-track, static-inject; parsers and OPA dropped). Every plugin is opt-in: they live in `cmd/*/plugins_<name>.go` files gated by `//go:build include_plugin_<name>`, and profiles are defined in `authbridge/scripts/profile-tags`.
 
 **Common:**
 - `authlib/` — shared auth library (JWT validation, token exchange, caching, routing, all listener implementations, all plugins).
@@ -177,17 +177,17 @@ into workload pods. Default deployment shape (proxy-sidecar mode):
 
 ## AuthBridge Binaries
 
-Two mode-specific binaries (proxy, envoy), one Dockerfile each; the `authbridge-lite` image is a build variant of the proxy binary (proxy Dockerfile + `exclude_plugin_*` tags):
+Two mode-specific binaries (proxy, envoy), one Dockerfile each; the `authbridge-lite` image is a build variant of the proxy binary (proxy Dockerfile + the `lite` profile's tags):
 
 | Binary | Mode | Listeners | Plugins |
 |--------|------|-----------|---------|
 | `cmd/authbridge-proxy/` | proxy-sidecar (default) | HTTP forward + reverse proxies | full (incl. parsers) |
 | `cmd/authbridge-envoy/` | envoy-sidecar | gRPC ext_proc on :9090 | full (incl. parsers) |
-| `authbridge-lite` _(image: proxy + `exclude_plugin_*`)_ | proxy-sidecar | HTTP forward + reverse proxies | trimmed plugin set (see `authbridge/scripts/lite-tags`) |
+| `authbridge-lite` _(image: proxy + `lite` profile)_ | proxy-sidecar | HTTP forward + reverse proxies | sidecar-minimum plugin set (see `authbridge/scripts/profile-tags`) |
 
 **Go modules:**
 - `authbridge/authlib/` — pure library: validation, exchange, cache, bypass, spiffe, routing, auth, config, all listener implementations, all plugins.
-- `authbridge/cmd/authbridge-{proxy,envoy}/` — thin main packages that import authlib and start the listeners they need. (The `authbridge-lite` image is `authbridge-proxy` built with `exclude_plugin_*` tags.)
+- `authbridge/cmd/authbridge-{proxy,envoy}/` — thin main packages that import authlib and start the listeners they need; they import no plugin package directly. (The `authbridge-lite` image is `authbridge-proxy` built with the `lite` profile.)
 - `authbridge/go.work` — workspace linking authlib + the binaries for local development.
 
 **Config format:** YAML with `${ENV_VAR}` expansion, mode presets, and startup validation. Supports `keycloak_url` + `keycloak_realm` derivation for operator compatibility. The `mode` field in YAML must match the binary (each binary rejects mismatched modes at boot).
@@ -197,7 +197,7 @@ Two mode-specific binaries (proxy, envoy), one Dockerfile each; the `authbridge-
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | `ci.yaml` | PR to main/release-* | Pre-commit, Go fmt/vet/build/test for authlib and the cmd/authbridge-* binaries; Python tests |
-| `build.yaml` | Tag push (`v*`) or manual | Multi-arch Docker builds for: proxy-init, authbridge (proxy-sidecar combined), authbridge-envoy (envoy-sidecar combined), authbridge-lite (proxy Dockerfile built with `exclude_plugin_*` tags from `authbridge/scripts/lite-tags`) |
+| `build.yaml` | Tag push (`v*`) or manual | Multi-arch Docker builds for: proxy-init, authbridge (proxy-sidecar combined), authbridge-envoy (envoy-sidecar combined), authbridge-lite (proxy Dockerfile built with the `lite` profile from `authbridge/scripts/profile-tags`). Every Go image passes `GO_BUILD_TAGS` naming a profile — plugins are all opt-in, so an image built without tags registers none |
 | `security-scans.yaml` | PR to main | Dependency review, shellcheck, YAML lint, Hadolint, Bandit, Trivy, CodeQL |
 | `scorecard.yaml` | Weekly / push to main | OpenSSF Scorecard security health metrics |
 | `spellcheck_action.yml` | PR | Spellcheck on markdown files |
@@ -228,8 +228,8 @@ All images are pushed to `ghcr.io/rossoctl/cortex/` from
 |-------|--------|-------------|
 | **`authbridge`** | **`authbridge/cmd/authbridge-proxy/Dockerfile`** | **proxy-sidecar combined image (default mode): authbridge-proxy (full plugin set incl. parsers) + spiffe-helper. No Envoy.** |
 | `authbridge-envoy` | `authbridge/cmd/authbridge-envoy/Dockerfile` | envoy-sidecar combined image: Envoy + authbridge-envoy (ext_proc, full plugin set) + spiffe-helper |
-| `authbridge-lite` | `authbridge/cmd/authbridge-proxy/Dockerfile` (+ `GO_BUILD_TAGS=exclude_plugin_*`) | proxy-sidecar combined image with a trimmed plugin set (see `authbridge/scripts/lite-tags`), plus spiffe-helper. A build variant of `authbridge`, not a separate binary; not yet referenced by the operator's default config |
-| `authbridge-cpex` | `authbridge/cmd/authbridge-cpex/Dockerfile` | proxy-sidecar build with the CPEX plugin: authbridge-proxy built with `-tags cpex`, links `libcpex_ffi.a` from a pinned CPEX release (CGO_ENABLED=1). Routes hooks through the CPEX framework (APL DSL + named CPEX policy plugins). FFI ABI version is read from `authbridge/cmd/authbridge-cpex/CPEX_FFI_VERSION` |
+| `authbridge-lite` | `authbridge/cmd/authbridge-proxy/Dockerfile` (+ `GO_BUILD_TAGS` from the `lite` profile) | proxy-sidecar combined image with a sidecar-minimum plugin set (see `authbridge/scripts/profile-tags`), plus spiffe-helper. A build variant of `authbridge`, not a separate binary; not yet referenced by the operator's default config |
+| `authbridge-cpex` | `authbridge/cmd/authbridge-cpex/Dockerfile` | proxy-sidecar build with the CPEX plugin. Two tag sources: the literal `cpex` tag, always required because it gates `cmd/authbridge-cpex/main.go`, plus the plugin tags its Dockerfile appends from `GO_BUILD_TAGS` (resolved from the `cpex` profile in `build.yaml`) — `cpex` alone registers no plugins. Links `libcpex_ffi.a` from a pinned CPEX release (CGO_ENABLED=1). Routes hooks through the CPEX framework (APL DSL + named CPEX policy plugins). FFI ABI version is read from `authbridge/cmd/authbridge-cpex/CPEX_FFI_VERSION` |
 | `proxy-init` | `authbridge/proxy-init/Dockerfile.init` | Alpine + iptables init container (envoy-sidecar + proxy-sidecar enforce-redirect modes) |
 
 In all three combined images, `spiffe-helper` is started conditionally
@@ -310,11 +310,11 @@ cd authbridge/proxy-init && make docker-build-init
 # Combined sidecars (proxy-sidecar default / envoy-sidecar)
 cd authbridge && podman build -f cmd/authbridge-proxy/Dockerfile -t authbridge:latest .
 cd authbridge && podman build -f cmd/authbridge-envoy/Dockerfile -t authbridge-envoy:latest .
-# authbridge-lite: same proxy Dockerfile, built with the trimmed
-# plugin set derived from plugin source by
-# authbridge/scripts/lite-tags.
-cd authbridge && LITE_TAGS=$(go -C scripts/lite-tags run .) && podman build -f cmd/authbridge-proxy/Dockerfile \
-  --build-arg GO_BUILD_TAGS="${LITE_TAGS}" \
+# authbridge-lite: same proxy Dockerfile, built with the `lite` profile
+# from authbridge/scripts/profile-tags. Plugins are all opt-in, so
+# GO_BUILD_TAGS is required — omitting it registers no plugins.
+cd authbridge && podman build -f cmd/authbridge-proxy/Dockerfile \
+  --build-arg GO_BUILD_TAGS="$(go -C scripts/profile-tags run . lite)" \
   -t authbridge-lite:latest .
 ```
 
@@ -365,7 +365,7 @@ cd authbridge && LITE_TAGS=$(go -C scripts/lite-tags run .) && podman build -f c
 
 ## Gotchas and Known Issues
 
-1. **Multiple Go modules:** The repo has several Go modules under `authbridge/` — `authlib/`, each `cmd/*/`, `storage/redis/`, `scripts/lite-tags/`, and the `demos/*/` self-contained ones — linked by `authbridge/go.work`. Local commands from a specific module directory should typically set `GOWORK=off` (as CI does) so the module resolves its own `replace` directives instead of pulling in workspace siblings.
+1. **Multiple Go modules:** The repo has several Go modules under `authbridge/` — `authlib/`, each `cmd/*/`, `storage/redis/`, `scripts/profile-tags/`, and the `demos/*/` self-contained ones — linked by `authbridge/go.work`. Local commands from a specific module directory should typically set `GOWORK=off` (as CI does) so the module resolves its own `replace` directives instead of pulling in workspace siblings.
 
 2. **Avoid committing venvs:** Virtual environment directories (e.g. `authbridge/proxy-init/quickstart/venv/`) should be gitignored (the repo's `.gitignore` has a `venv` pattern). Do not create and commit new virtual environments under version control.
 

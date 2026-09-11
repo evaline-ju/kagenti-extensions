@@ -1,14 +1,14 @@
 // Package main is the proxy-sidecar authbridge binary: HTTP forward
-// proxy + reverse proxy, no Envoy / gRPC dependencies. By default it
-// compiles in every registered plugin. Every plugin — including
-// jwt-validation and token-exchange — has its own plugins_<name>.go
-// file gated by `//go:build !exclude_plugin_<name>`, so any subset can
-// be dropped at build time via `-tags exclude_plugin_<name>`. main.go
-// imports no plugin package directly.
+// proxy + reverse proxy, no Envoy / gRPC dependencies. It links only the
+// plugins its build tags name — nothing is compiled in by default. Every
+// plugin has its own plugins_<name>.go file gated by
+// `//go:build include_plugin_<name>`, so a binary contains exactly the
+// set it was built with. main.go imports no plugin package directly.
 //
-// The `authbridge-lite` image is this same binary built with everything
-// except jwt-validation + token-exchange excluded — it is a build
-// variant, not a separate binary.
+// Tag sets are generated per profile by authbridge/scripts/profile-tags:
+// `local` for the desktop artifact (the three parsers + tool-prune),
+// `full` for the Kubernetes image. A build with no tags registers no
+// plugins and will reject any config that names one.
 //
 // Mode is hardcoded to proxy-sidecar; YAML configs that specify a
 // different mode are rejected at boot. For envoy-sidecar mode, use
@@ -53,9 +53,9 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/transparentproxy"
 	// Plugins are wired via per-plugin plugins_<name>.go files, each gated
-	// by `//go:build !exclude_plugin_<name>`. main.go imports no plugin
-	// package directly, so every plugin can be dropped at build time. The
-	// authbridge-lite image excludes all but jwt-validation + token-exchange.
+	// by `//go:build include_plugin_<name>`. main.go imports no plugin
+	// package directly, so a binary links exactly the set its profile names
+	// (see authbridge/scripts/profile-tags).
 )
 
 // version is the authbridge-proxy build version, overridden at release time

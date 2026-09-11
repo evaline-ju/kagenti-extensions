@@ -1,4 +1,4 @@
-//go:build !exclude_plugin_litellm_budgettrack
+//go:build include_plugin_litellm_budgettrack
 
 package main
 

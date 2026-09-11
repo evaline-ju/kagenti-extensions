@@ -6,11 +6,11 @@ convention, session-event contract, and lifecycle interfaces plugins
 implement, see [`plugin-reference.md`](./plugin-reference.md). For
 writing a new plugin, see [`plugin-tutorial.md`](./plugin-tutorial.md).
 
-"Production ready?" reflects whether the plugin is compiled into the
-default build of `cmd/authbridge-proxy` / `cmd/authbridge-envoy` (opt-out
-via `-tags exclude_plugin_<name>`) versus opt-in (`-tags
-include_plugin_<name>`) or requiring a separate binary. It is a build-tag
-signal, not a claim about test coverage or operational maturity.
+"Production ready?" reflects whether the plugin is carried by a shipped
+profile in `authbridge/scripts/profile-tags` versus available only on
+explicit request or requiring a separate binary. Every plugin is opt-in
+(`-tags include_plugin_<name>`); a build with no tags registers none. It is
+a packaging signal, not a claim about test coverage or operational maturity.
 
 ## Plugins
 

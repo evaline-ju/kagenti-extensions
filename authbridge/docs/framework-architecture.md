@@ -703,8 +703,8 @@ identity:
 The mTLS code lives in `authlib/tls` + `authlib/spiffe` (framework-
 shared) and `authlib/listener/internal/tlssniff` (listener-internal
 byte-peek dispatcher). Only `cmd/authbridge-proxy` wires it up (this
-also covers the `authbridge-lite` image — the same binary built with
-`exclude_plugin_*` tags); `cmd/authbridge-envoy` stays on
+also covers the `authbridge-lite` image — the same binary built with the
+`lite` profile); `cmd/authbridge-envoy` stays on
 plaintext-localhost because Envoy handles wire encryption via SDS
 independently.
 

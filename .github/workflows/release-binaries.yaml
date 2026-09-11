@@ -121,16 +121,18 @@ jobs:
           } >> "${GITHUB_ENV}"
           mkdir -p dist
 
-          # authbridge-proxy variants: "<suffix>:<build-tags>". Empty
-          # suffix is the default plugin set. One variant per opt-in
-          # plugin (or one combined "full") — never enumerate combos.
-          # Lite tags are derived from plugin source; see
-          # authbridge/scripts/lite-tags.
-          lite_tags=$(go -C authbridge/scripts/lite-tags run .)
+          # authbridge-proxy variants: "<suffix>:<build-tags>". Empty suffix is
+          # the default artifact. Every plugin is opt-in, so a variant with no
+          # tags would register NO plugins and reject every config it is given —
+          # each entry must name a profile. Profiles live in
+          # authbridge/scripts/profile-tags; never enumerate tag combos here.
+          profile_tags() { go -C authbridge/scripts/profile-tags run . "$1"; }
+          full_tags=$(profile_tags full)
+          lite_tags=$(profile_tags lite)
           declare -a proxy_variants=(
-            ":"
+            ":${full_tags}"
             "lite:${lite_tags}"
-            "sessionbudget:include_plugin_sessionbudget"
+            "sessionbudget:${full_tags},include_plugin_sessionbudget"
           )
 
           build_proxy() {

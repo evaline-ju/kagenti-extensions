@@ -66,6 +66,50 @@ jobs:
       - name: Test
         run: go test -v -race -cover ./...
 
+  # The plugin-profile guards live in their own module, so no other job runs
+  # them. They have to run on every PR: plugins are all opt-in, and a plugin
+  # missing from every profile produces no build error — it just silently
+  # disappears from every image. TestEveryPluginIsAccountedFor is the only thing
+  # between that and a shipped artifact.
+  go-ci-profile-tags:
+    name: Go CI (plugin profiles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: authbridge/scripts/profile-tags
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: authbridge/scripts/profile-tags/go.mod
+
+      - name: Lint
+        run: |
+          go fmt ./...
+          go vet ./...
+
+      # The guards read sibling trees through relative paths (../../cmd, the repo
+      # root), so they need the full checkout, not just this module. -count=1 is
+      # required, not cosmetic: Go's test cache keys on this package's own inputs
+      # and knows nothing about those sibling files, so a cached PASS can outlive
+      # the change that should have broken it.
+      - name: Test
+        run: go test -count=1 -v -cover ./...
+
+      # Every profile must resolve to a non-empty tag list. A profile that
+      # silently yields nothing would flow into `go build -tags ""`.
+      - name: Every profile resolves
+        run: |
+          for profile in local full lite envoy cpex; do
+            tags=$(go run . "${profile}")
+            [ -n "${tags}" ] || { echo "profile ${profile} resolved to no tags"; exit 1; }
+            echo "${profile}: ${tags}"
+          done
+
   go-ci-authbridge-cmd:
     name: Go CI (authbridge ${{ matrix.binary }})
     runs-on: ubuntu-latest
@@ -113,16 +157,25 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      # The authbridge-lite image is this same authbridge-proxy binary built
-      # with the trimmed plugin set derived by authbridge/scripts/lite-tags.
-      # Build AND test that tag set on every PR — build.yaml only exercises
-      # it on tag/main pushes, and this guards against lite-only regressions.
-      - name: Build + test lite variant
-        if: matrix.binary == 'authbridge-proxy'
+      # Every plugin is opt-in, so the Build and Test steps above exercise a
+      # binary with NO plugins linked. That is worth compiling on its own — it is
+      # what a caller who forgets -tags gets — but the shipped artifacts are the
+      # profiles, so build AND test each one here. build.yaml only exercises them
+      # on tag/main pushes; this catches a profile-only regression on the PR.
+      - name: Build + test each shipped profile
+        if: matrix.binary == 'authbridge-proxy' || matrix.binary == 'authbridge-envoy'
         run: |
-          TAGS=$(go -C ../../scripts/lite-tags run .)
-          go build -v -tags "$TAGS" ./...
-          go test -v -race -cover -tags "$TAGS" ./...
+          case "${{ matrix.binary }}" in
+            authbridge-proxy) profiles="local full lite" ;;
+            authbridge-envoy) profiles="envoy" ;;
+          esac
+          for profile in ${profiles}; do
+            echo "::group::profile ${profile}"
+            TAGS=$(go -C ../../scripts/profile-tags run . "${profile}")
+            go build -v -tags "${TAGS}" ./...
+            go test -race -cover -tags "${TAGS}" ./...
+            echo "::endgroup::"
+          done
 
       - name: Test
         run: go test -v -race -cover ./...

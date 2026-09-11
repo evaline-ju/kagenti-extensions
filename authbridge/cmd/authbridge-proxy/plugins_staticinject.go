@@ -1,4 +1,4 @@
-//go:build !exclude_plugin_staticinject
+//go:build include_plugin_staticinject
 
 package main
 

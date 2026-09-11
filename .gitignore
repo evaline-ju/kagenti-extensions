@@ -100,6 +100,6 @@ cortex-ca/
 # gitlinks pins another branch's checkout into this tree, which is never wanted.
 .worktrees/
 
-# `go build ./...` inside authbridge/scripts/lite-tags drops its 3 MB binary beside
+# `go build ./...` inside authbridge/scripts/profile-tags drops its 3 MB binary beside
 # the source, where it is easy to stage by accident — it was, once.
-/authbridge/scripts/lite-tags/lite-tags
+/authbridge/scripts/profile-tags/profile-tags
