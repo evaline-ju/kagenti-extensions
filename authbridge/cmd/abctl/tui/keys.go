@@ -159,6 +159,12 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// handler rather than being reimplemented here.
 		case "c", "esc", "enter":
 			m.colPicker = false
+			// Persist on close, not on each toggle: a user trying four columns on the
+			// way to the two they want would otherwise produce three writes describing
+			// states they rejected. `q` is not handled here — it falls through to the
+			// global quit above, because quitting is not settling on a selection.
+			Settings.Events.Columns = columnSettingsFrom(m.eventColumns)
+			m.persistSettings()
 			return nil
 		case "up", "k":
 			if m.colCursor > 0 {
@@ -289,18 +295,33 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.handleEditKey(msg)
 	}
 
-	// Filter-mode: input box consumes most keys. Esc cancels, Enter commits.
+	// Filter-mode: input box consumes most keys. Esc cancels (restores the filter as
+	// it was at `/`), Enter commits and is the only key that persists.
 	if m.filtering {
 		switch msg.String() {
 		case "esc":
+			// Cancel, so it restores what was in effect when `/` was pressed and writes
+			// nothing. It used to clear the filter instead — which, once filters began
+			// persisting, meant one mis-keyed Esc permanently discarded a committed
+			// filter, while the README and this file both called the key "cancel".
+			//
+			// Clearing has not been lost: empty the box and press Enter. That keeps Enter
+			// as the only key that writes, which is the property worth having.
 			m.filtering = false
-			m.filter = ""
-			m.filterInput.SetValue("")
+			m.filter = m.filterBeforeEdit
+			m.filterInput.SetValue(m.filterBeforeEdit)
 			m.refreshActivePane()
 			return nil
 		case "enter":
 			m.filter = m.filterInput.Value()
 			m.filtering = false
+			// Commit, not keystroke: the fallthrough below re-reads the input on every
+			// character typed, and saving there would write once per keypress.
+			//
+			// The only key that persists a filter. An empty box committed here is how a
+			// filter is cleared and the clearing made durable, now that Esc cancels.
+			Settings.Filter = m.filter
+			m.persistSettings()
 			m.refreshActivePane()
 			return nil
 		}
@@ -330,6 +351,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 	case "/":
 		m.filtering = true
+		// Snapshot for Esc. Taken here rather than derived on the way out, because by
+		// then the input has already been edited and the original is gone.
+		m.filterBeforeEdit = m.filter
 		m.filterInput.Focus()
 		return nil
 
@@ -697,6 +721,26 @@ func (m *model) setFlash(s string) {
 	// Explicitly clear: a timed message arriving after a sticky one must not
 	// inherit its stickiness.
 	m.flashSticky = false
+}
+
+// persistSettings hands the current Settings to the save hook, if one is wired.
+//
+// Failure is reported once through the footer flash and then dropped. Three
+// constraints shape that: bubbletea owns the terminal via WithAltScreen, so
+// writing to stderr here would corrupt the frame; the user cannot fix a read-only
+// $HOME from inside the TUI, so an error that blocks or repeats is noise; and a
+// preference that failed to save costs them one re-toggle next launch. Silence was
+// the alternative, and it would leave a read-only home failing invisibly forever —
+// the flash mechanism already exists for exactly this class of non-fatal problem.
+//
+// Never retries: a full disk would turn a retry loop into a redraw storm.
+func (m *model) persistSettings() {
+	if m.save == nil {
+		return
+	}
+	if err := m.save(Settings); err != nil {
+		m.setFlash("could not save settings: " + err.Error())
+	}
 }
 
 // setStickyFlash shows a message that stays until the next keypress. For yank,

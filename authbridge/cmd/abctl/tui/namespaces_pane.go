@@ -83,14 +83,25 @@ func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortF
 	ti := textinput.New()
 	ti.Placeholder = "filter…"
 	ti.Prompt = "/ "
+	// Seed the input, not just m.filter: the filter box renders only while filtering,
+	// so a restored filter was applied invisibly — the list came back truncated with
+	// nothing on screen saying why. Worse, `/` then one character replaced the saved
+	// filter with that character, and `/` then Esc persisted an empty one, discarding
+	// it for good.
+	ti.SetValue(Settings.Filter)
 
 	return &model{
 		// endpoint and client are set later, when portForwardReadyMsg arrives.
-		parentCtx:    parentCtx,
-		ctx:          ctx,
-		cancel:       cancel,
-		events:       make(map[string][]pipeline.SessionEvent),
-		pane:         paneNamespaces,
+		parentCtx: parentCtx,
+		ctx:       ctx,
+		cancel:    cancel,
+		events:    make(map[string][]pipeline.SessionEvent),
+		pane:      paneNamespaces,
+		// Seeded here as well as in New: this constructor's doc comment promises it
+		// mirrors New's field initialization, and the events table it reaches after a
+		// port-forward reads both of these.
+		eventColumns: Settings.columnSelection(),
+		filter:       Settings.Filter,
 		sessionsTbl:  newSessionsTable(),
 		eventsTbl:    newEventsTable(),
 		pipelineTbl:  newPipelineTable(),
