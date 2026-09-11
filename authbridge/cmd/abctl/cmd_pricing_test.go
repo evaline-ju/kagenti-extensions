@@ -50,15 +50,23 @@ func TestRunPricing_HostViewShowsTheDiscountApplied(t *testing.T) {
 	// resolves at prompt size 0 — so its row MUST carry the marker and the footnote
 	// must give the breakpoint. Quoting a below-threshold rate as if it were the only
 	// rate is the exact failure this package exists to remove.
-	if row := modelRow(t, got, "claude-sonnet-4-5"); !strings.Contains(row, "*") {
-		t.Errorf("sonnet-4-5 row %q is not marked as having long-context tiers", row)
-	}
 	if !strings.Contains(got, "long-context rates apply above 200,000 prompt tokens") {
-		t.Errorf("no long-context footnote with a breakpoint: %s", got)
+		t.Errorf("no long-context note with a breakpoint: %s", got)
 	}
-	// A model without a tier must not be marked.
-	if row := modelRow(t, got, "claude-opus-5"); strings.Contains(row, "*") {
-		t.Errorf("opus-5 row %q is marked, but it has no long-context tier", row)
+	// The above-threshold rates must be present AND scaled: sonnet-4-5's 200k input
+	// premium is 6.00 at list, so at 0.76 it is 4.56. Quoting 6.00 here would be the
+	// unscaled figure; quoting nothing would leave the operator doing the arithmetic
+	// this command exists to do.
+	af := overrideAfter(t, got, "claude-sonnet-4-5")
+	if len(af) != 7 {
+		t.Fatalf("override line has %d columns, want 7: %q", len(af), af)
+	}
+	if af[3] != "4.56" {
+		t.Errorf("above-threshold input = %q, want the scaled 4.56 (6.00 means unscaled)", af[3])
+	}
+	// A model without a tier gets no continuation line.
+	if _, ok := overrideLineAfter(got, "claude-opus-5"); ok {
+		t.Error("opus-5 has a long-context line, but it has no long-context tier")
 	}
 }
 
@@ -176,22 +184,32 @@ func TestRunPricing_TableViewShowsLongContextOverrides(t *testing.T) {
 // the right model.
 func overrideAfter(t *testing.T, out, model string) []string {
 	t.Helper()
+	f, ok := overrideLineAfter(out, model)
+	if !ok {
+		t.Fatalf("no long-context line after the %s row in:\n%s", model, tail(out))
+	}
+	return f
+}
+
+// overrideLineAfter returns the long-context continuation line following a model's row.
+//
+// Handles both views: the raw table leads with the endpoint (model is the second column),
+// the host view leads with the model. Matching either position keeps one helper for both
+// rather than two that can disagree about what "the line after" means.
+func overrideLineAfter(out, model string) ([]string, bool) {
 	lines := strings.Split(out, "\n")
 	for i, line := range lines {
-		// Raw view columns: endpoint, model, four rates, provenance.
-		if f := strings.Fields(line); len(f) > 1 && f[1] == model {
-			if i+1 >= len(lines) {
-				t.Fatalf("%s is the last line; no override line follows it", model)
-			}
-			nf := strings.Fields(lines[i+1])
-			if len(nf) == 0 || nf[0] != "above" {
-				t.Fatalf("no override line after the %s row, got %q", model, lines[i+1])
-			}
-			return nf
+		f := strings.Fields(line)
+		onRow := (len(f) > 0 && f[0] == model) || (len(f) > 1 && f[1] == model)
+		if !onRow || i+1 >= len(lines) {
+			continue
 		}
+		if nf := strings.Fields(lines[i+1]); len(nf) > 0 && nf[0] == "above" {
+			return nf, true
+		}
+		return nil, false
 	}
-	t.Fatalf("no %s row in:\n%s", model, tail(out))
-	return nil
+	return nil, false
 }
 
 func tail(s string) string {

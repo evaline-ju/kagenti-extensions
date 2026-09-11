@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -76,7 +77,13 @@ Flags:
 
 func fetchPricing(url string) ([]byte, error) {
 	c := &http.Client{Timeout: 10 * time.Second}
-	resp, err := c.Get(url)
+	// Request carries a context even though the client bounds the deadline: it is what
+	// lets a caller cancel, and it keeps this call the same shape as the rest of abctl.
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cannot build a request for %s: %w", url, err)
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach the stat server at %s: %w", url, err)
 	}
@@ -102,6 +109,10 @@ type effective struct {
 		Provenance string  `json:"provenance"`
 		Unpriced   bool    `json:"unpriced"`
 		LongCtx    int     `json:"longContextAbove"`
+		AboveIn    float64 `json:"aboveInputPerMillion"`
+		AboveCW    float64 `json:"aboveCacheWritePerMillion"`
+		AboveCR    float64 `json:"aboveCacheReadPerMillion"`
+		AboveOut   float64 `json:"aboveOutputPerMillion"`
 		In         float64 `json:"inputPerMillion"`
 		CW         float64 `json:"cacheWritePerMillion"`
 		CR         float64 `json:"cacheReadPerMillion"`
@@ -124,27 +135,37 @@ func renderEffective(body []byte, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s  %s\n", m.Model, "-", "-", "-", "-", "UNPRICED")
 			continue
 		}
-		name := m.Model
-		// Marked, because the figures on this row are the BELOW-threshold ones. An
-		// unmarked row would quote a long session a rate it is not charged, which is
-		// the failure the pricing work exists to remove — it must not come back in
-		// the tool built to inspect it.
-		if m.LongCtx > 0 {
-			name += " *"
-			breakpoints = append(breakpoints, m.LongCtx)
-		}
-		fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s  %s\n", name,
+		fmt.Fprintf(stdout, "  %-30s %9s %9s %9s %9s  %s\n", m.Model,
 			rate(m.In), rate(m.CW), rate(m.CR), rate(m.Out), m.Provenance)
+		// The above-threshold rates, discount already applied, on a continuation line.
+		// Naming the breakpoint alone still left the operator to work out what their long
+		// sessions cost — by reading the raw table and applying the factor by hand, which
+		// is the arithmetic this command exists to do.
+		if m.LongCtx > 0 {
+			breakpoints = append(breakpoints, m.LongCtx)
+			fmt.Fprintf(stdout, "    %-28s %9s %9s %9s %9s\n",
+				"above "+commas(m.LongCtx)+" tok:",
+				rate(m.AboveIn), rate(m.AboveCW), rate(m.AboveCR), rate(m.AboveOut))
+		}
+	}
+	// The footer used to call the rates "vendor list" unconditionally, directly beneath
+	// rows that may read `configured` — an operator's own pinned figures described back
+	// to them as the vendor's. Keyed off what the rows actually say instead.
+	base := "vendor list"
+	if allConfigured(e) {
+		base = "your configured rates"
+	} else if anyConfigured(e) {
+		base = "vendor list except where a row reads `configured`"
 	}
 	if e.Multiplier != 1 {
-		fmt.Fprintf(stdout, "\n  multiplier %.4g applied, from the %s rules — rates above are vendor list scaled by it\n",
-			e.Multiplier, e.MultiplierFrom)
+		fmt.Fprintf(stdout, "\n  multiplier %.4g applied, from the %s rules — rates above are %s scaled by it\n",
+			e.Multiplier, e.MultiplierFrom, base)
 	} else {
-		fmt.Fprintf(stdout, "\n  no gateway discount applies to this endpoint; rates above are vendor list\n")
+		fmt.Fprintf(stdout, "\n  no gateway discount applies to this endpoint; rates above are %s\n", base)
 	}
 	if len(breakpoints) > 0 {
-		fmt.Fprintf(stdout, "  * long-context rates apply above %s prompt tokens — the figures above are the\n"+
-			"    below-threshold ones, so a longer request costs MORE than shown\n", breakpointList(breakpoints))
+		fmt.Fprintf(stdout, "  long-context rates apply above %s prompt tokens; the indented line under a\n"+
+			"  model is what a request past that breakpoint is charged\n", breakpointList(breakpoints))
 	}
 	return 0
 }
@@ -275,4 +296,29 @@ func commas(n int) string {
 		b.WriteString(s[i : i+3])
 	}
 	return b.String()
+}
+
+// allConfigured / anyConfigured report how much of a host view is the operator's own
+// pinning, so the footer can describe the rates it is actually printing.
+func allConfigured(e effective) bool {
+	n := 0
+	for _, m := range e.Models {
+		if m.Unpriced {
+			continue
+		}
+		if m.Provenance != "configured" {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+func anyConfigured(e effective) bool {
+	for _, m := range e.Models {
+		if !m.Unpriced && m.Provenance == "configured" {
+			return true
+		}
+	}
+	return false
 }

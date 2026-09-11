@@ -255,3 +255,86 @@ func TestRates_ScaleScalesThresholds(t *testing.T) {
 		t.Errorf("above the threshold = %v, want the scaled premium 7.5e-6", b.Base[TierInput])
 	}
 }
+
+// An operator who measures their gateway and pins the real per-model rates must not have
+// those rates scaled again by a shipped multiplier. The pinned figures are already
+// post-discount; scaling them understates spend by the factor, and understating is the
+// direction that hides cost.
+func TestMultiplier_ShippedFactorDoesNotScaleConfiguredRates(t *testing.T) {
+	shipped := "ete-litellm.ai-models.vpc-int.res.ibm.com"
+	// The operator's own measurement: 3.80/Mtok input, i.e. list x 0.76 already.
+	var pinned Rates
+	pinned.Base[TierInput] = 3.8 / tokensPerMillion
+	pinned.Set[TierInput] = true
+
+	tab, err := NewTable(
+		[]Entry{{Host: shipped, Model: "claude-opus-5", Rates: pinned, Prov: ProvConfigured}},
+		bundledMultipliers()...,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rates, prov := tab.Resolve(shipped, "claude-opus-5", 0)
+	if got := perM(rates, TierInput); got != 3.8 {
+		t.Errorf("input = %v/Mtok, want the pinned 3.8 unscaled; 2.888 means the shipped 0.76 was applied on top", got)
+	}
+	if prov != ProvConfigured {
+		t.Errorf("provenance = %v, want configured", prov)
+	}
+	// A CONFIGURED multiplier still applies to configured rates — the operator asked
+	// for both, and the host view shows the factor.
+	half := 0.5
+	tab2, err := Build(&Config{Endpoints: []EndpointConfig{{
+		Hosts:      []string{shipped},
+		Multiplier: &half,
+		Models: map[string]ModelConfig{"claude-opus-5": {
+			TierRates: TierRates{InputCostPerMillion: 3.8},
+		}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := perM(mustResolve(t, tab2, shipped, "claude-opus-5"), TierInput); got != 1.9 {
+		t.Errorf("configured x configured = %v/Mtok, want 1.9", got)
+	}
+}
+
+func mustResolve(t *testing.T, tab *Table, host, model string) Rates {
+	t.Helper()
+	r, prov := tab.Resolve(host, model, 0)
+	if prov == ProvNone {
+		t.Fatalf("%s/%s resolved unpriced", host, model)
+	}
+	return r
+}
+
+// Both checks the rate rows apply, applied to multiplier rules too. Each failure is
+// silent and in the same direction: the gateway stays at list, overstating a discount.
+func TestMultiplier_RejectsPortAndDuplicateRules(t *testing.T) {
+	t.Run("port in the pattern", func(t *testing.T) {
+		_, err := NewTable(nil, MultiplierRule{Host: "gw.internal:4000", Factor: 0.9, Prov: ProvConfigured})
+		if err == nil {
+			t.Fatal("accepted a host pattern with a port, which can never match")
+		}
+		if !strings.Contains(err.Error(), `use "gw.internal"`) {
+			t.Errorf("error does not name the fix: %v", err)
+		}
+	})
+	t.Run("duplicate host and provenance", func(t *testing.T) {
+		_, err := NewTable(nil,
+			MultiplierRule{Host: "gw.internal", Factor: 0.9, Prov: ProvConfigured},
+			MultiplierRule{Host: "gw.internal", Factor: 0.5, Prov: ProvConfigured},
+		)
+		if err == nil {
+			t.Fatal("accepted two factors for one host; one would be silently ignored")
+		}
+	})
+	t.Run("same host at different provenance is fine", func(t *testing.T) {
+		if _, err := NewTable(nil,
+			MultiplierRule{Host: "gw.internal", Factor: 0.9, Prov: ProvBundled},
+			MultiplierRule{Host: "gw.internal", Factor: 0.5, Prov: ProvConfigured},
+		); err != nil {
+			t.Fatalf("rejected a legitimate operator override of a shipped rule: %v", err)
+		}
+	})
+}

@@ -437,7 +437,9 @@ reports what it charged, so the factor is one division:
 # Non-streamed, so the gateway settles the cost before replying. A streamed response
 # reports 0 in that header by design, which is why this cannot be learned from live
 # agent traffic.
-curl -sD - -o /dev/null "$GATEWAY/v1/messages" \
+# --proto '=https' so a mistyped http:// URL fails instead of putting $KEY on the wire
+# in cleartext.
+curl -sD - -o /dev/null --proto '=https' "$GATEWAY/v1/messages" \
   -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
   -d '{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}' \
   | grep -i x-litellm-response-cost-original
@@ -453,6 +455,13 @@ Cortex checks this for you as traffic flows. When a non-streamed response carrie
 settled cost that disagrees with the modelled figure by more than 5%, `litellm-budget-track`
 warns once per endpoint and model with both numbers and the ratio — so a stale or missing
 factor announces itself rather than quietly misreporting spend.
+
+**Pinned rates are never scaled by a shipped multiplier.** If you pin per-model rates for
+a host that also matches a discount Cortex ships, the shipped factor is dropped for that
+host — your figures are already what the gateway charges, and scaling them again would
+understate spend by the factor. `abctl pricing --host <gateway>` shows `multiplier 1` there
+to confirm it. A multiplier you configure yourself does still apply on top of your own
+rates, since asking for both is a thing an operator can legitimately mean.
 
 Reach for per-model rates only when a gateway's prices are genuinely negotiated per
 model rather than derived from list:

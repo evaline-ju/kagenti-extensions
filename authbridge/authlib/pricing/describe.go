@@ -73,6 +73,18 @@ type EffectiveRates struct {
 	// the tool built to inspect it. The bundled table ships four such models.
 	LongContextAbove int `json:"longContextAbove,omitempty"`
 
+	// Above* are the rates once LongContextAbove is exceeded, resolved the same way and
+	// with the same multiplier applied. Present only when LongContextAbove is.
+	//
+	// Naming the breakpoint without its prices told an operator that their long sessions
+	// cost something other than the figures above, and left them to find out what by
+	// reading the raw table and applying the discount by hand — which is the arithmetic
+	// this endpoint exists to do for them.
+	AboveInputPerMillion      float64 `json:"aboveInputPerMillion,omitempty"`
+	AboveCacheWritePerMillion float64 `json:"aboveCacheWritePerMillion,omitempty"`
+	AboveCacheReadPerMillion  float64 `json:"aboveCacheReadPerMillion,omitempty"`
+	AboveOutputPerMillion     float64 `json:"aboveOutputPerMillion,omitempty"`
+
 	InputPerMillion      float64 `json:"inputPerMillion,omitempty"`
 	CacheWritePerMillion float64 `json:"cacheWritePerMillion,omitempty"`
 	CacheReadPerMillion  float64 `json:"cacheReadPerMillion,omitempty"`
@@ -179,6 +191,15 @@ func (t *Table) EffectiveFor(host string) Effective {
 		// threshold into Base, so the thresholds are only visible on the row itself.
 		if lo := t.lowestThresholdFor(host, m); lo > 0 {
 			e.LongContextAbove = lo
+			// lo+1 because a threshold applies to prompts that EXCEED it — a request of
+			// exactly lo tokens pays base, per Rates.At.
+			above, aprov := t.Resolve(host, m, lo+1)
+			if aprov != ProvNone {
+				e.AboveInputPerMillion = perM(above, TierInput)
+				e.AboveCacheWritePerMillion = perM(above, TierCacheWrite)
+				e.AboveCacheReadPerMillion = perM(above, TierCacheRead)
+				e.AboveOutputPerMillion = perM(above, TierOutput)
+			}
 		}
 		if prov != ProvNone {
 			e.InputPerMillion = perM(rates, TierInput)

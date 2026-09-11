@@ -3,6 +3,8 @@ package litellm_budgettrack
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -89,11 +91,26 @@ func (p *BudgetTrack) checkDrift(pctx *pipeline.Context, authoritative float64) 
 	}
 	modelled := float64(micros) / 1e6
 	ratio := modelled / authoritative
-	if ratio > 1-driftTolerance && ratio < 1+driftTolerance {
+	// Inclusive bounds: the contract above says "more than 5%", and a strict compare
+	// warned AT exactly 5%.
+	if ratio >= 1-driftTolerance && ratio <= 1+driftTolerance {
+		return
+	}
+	// Only compare figures that mean the same thing. See the header block in plugin.go:
+	// the "-original" fallback is the charged cost on a gateway that runs no LiteLLM
+	// discount/margin layer, but where one IS configured it is the figure BEFORE that
+	// layer, and comparing a modelled cost against it would report drift that is really
+	// the operator's own gateway-side adjustment. Skipped rather than guessed at,
+	// because the arithmetic relating the two is not something this code can verify.
+	if !driftComparable(pctx) {
 		return
 	}
 
-	key := pctx.Host + "\x00" + inf.Model
+	// Normalized the SAME way resolution normalizes, via the pricing package rather
+	// than a local copy. Keying on the raw Host gave "GW.internal:443" and "gw.internal"
+	// separate entries for one endpoint, so the same drift could warn repeatedly and the
+	// key budget drained faster than the cap implies.
+	key := pricing.EndpointKey(pctx.Host) + "\x00" + strings.ToLower(inf.Model)
 	p.drift.mu.Lock()
 	if p.drift.seen == nil {
 		p.drift.seen = map[string]struct{}{}
@@ -133,4 +150,40 @@ func (p *BudgetTrack) checkDrift(pctx *pipeline.Context, authoritative float64) 
 		"effect", direction+"stating every request this table prices, including streamed ones where no gateway figure exists",
 		"rates_from", prov.String(),
 		"fix", "set pricing.endpoints[].multiplier for this endpoint (a fraction of list), or per-model rates; `abctl pricing --host <endpoint>` shows what is in effect")
+}
+
+// driftComparable reports whether the gateway's figure can be compared against a modelled
+// one at all.
+//
+// False when the bare header is absent AND LiteLLM's own discount/margin layer is active:
+// the fallback figure is then pre-adjustment while the modelled figure is what the caller
+// pays, so any comparison measures the gateway's adjustment rather than the rate table.
+func driftComparable(pctx *pipeline.Context) bool {
+	if pctx.ResponseHeaders.Get(responseCostHeader) != "" {
+		return true // the effective figure itself; nothing to reconcile
+	}
+	for _, h := range []string{costDiscountAmountHeader, costMarginAmountHeader} {
+		v := pctx.ResponseHeaders.Get(h)
+		if v == "" {
+			continue
+		}
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// resetDrift clears the dedup set and the cap.
+//
+// Called on Configure, which is also the hot-reload path: a reload is an operator having
+// changed something, quite possibly the multiplier this check told them to set, so the
+// old "already warned about that" state is stale. It is also the only way out of the cap
+// short of a restart, which answers the note that a capped reporter otherwise stays off
+// for the life of the process.
+func (p *BudgetTrack) resetDrift() {
+	p.drift.mu.Lock()
+	p.drift.seen = nil
+	p.drift.capped = false
+	p.drift.mu.Unlock()
 }

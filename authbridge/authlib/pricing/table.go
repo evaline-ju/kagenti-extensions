@@ -324,6 +324,10 @@ func NewTable(entries []Entry, mults ...MultiplierRule) (*Table, error) {
 			},
 		})
 	}
+	// Multiplier rules get the SAME two checks as rate rows above. They were skipped
+	// here, and both failures are silent in the same direction: a rule that never
+	// matches leaves its gateway at vendor list, which overstates a discounted gateway.
+	seenMult := make(map[string]struct{}, len(mults))
 	for i, m := range mults {
 		where := fmt.Sprintf("pricing multiplier[%d]", i)
 		if m.Host != "" {
@@ -338,6 +342,23 @@ func NewTable(entries []Entry, mults ...MultiplierRule) (*Table, error) {
 			return nil, fmt.Errorf("%s: provenance %d is not a table level", where, int(m.Prov))
 		}
 		host := strings.ToLower(m.Host)
+		// A port in the pattern can never match, because hostKey strips the port from
+		// the endpoint and never from the pattern. Copying an endpoint out of a URL is
+		// the likeliest way to write this field, so name the fix.
+		if !anyHost(host) {
+			if bare := hostKey(host); bare != host {
+				return nil, fmt.Errorf("%s: host pattern must not include a port (ports are stripped from the endpoint before matching, so this would never match); use %q", where, bare)
+			}
+		}
+		// Two rules with the same host and provenance rank equal, so multiplierFor keeps
+		// whichever came first and the other factor is silently ignored — and which one
+		// wins depends on config iteration order. Rejected, exactly as duplicate rate
+		// rows are.
+		dupKey := host + "\x00" + m.Prov.String()
+		if _, dup := seenMult[dupKey]; dup {
+			return nil, fmt.Errorf("%s: duplicate multiplier for this host at %s provenance; one of the two factors would be silently ignored", where, m.Prov)
+		}
+		seenMult[dupKey] = struct{}{}
 		t.mults = append(t.mults, multRule{
 			host:   host,
 			factor: m.Factor,
@@ -401,6 +422,21 @@ func (t *Table) Resolve(endpoint, model string, promptTotal int) (Rates, Provena
 	// already pinned. The weaker reading looks more conservative and is in fact less
 	// informative.
 	f, mprov := t.multiplierFor(endpoint)
+	// A multiplier WEAKER than the rates it would scale is dropped.
+	//
+	// The case is an operator who measured their gateway and pinned the real per-model
+	// rates for a host that also carries a shipped multiplier: the pinned figures are
+	// already post-discount, so scaling them again understates spend by the factor —
+	// ~24% for the shipped 0.76, and understating is the direction this package treats
+	// as dangerous, because it hides cost rather than exaggerating it.
+	//
+	// Framed as provenance rather than as a special case for bundled: a scalar derived
+	// from list may only scale rates that are themselves list-derived. Configured rates
+	// with a configured multiplier still both apply — the operator asked for both, and
+	// `abctl pricing --host` shows the factor being applied.
+	if mprov < prov {
+		f, mprov = 1, ProvNone
+	}
 	// Provenance is bumped OUTSIDE the f != 1 guard. An operator who writes
 	// `multiplier: 1.0` to say "this endpoint bills at list" has told us about their
 	// gateway just as much as one who writes 0.76 — that is the whole rationale above —
