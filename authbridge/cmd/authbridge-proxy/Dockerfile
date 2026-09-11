@@ -31,7 +31,15 @@ COPY authlib/ authlib/
 COPY storage/ storage/
 COPY cmd/authbridge-proxy/ cmd/authbridge-proxy/
 
+# Plugins are all opt-in, so a build with no tags registers none. Such an image
+# is never a valid artifact: it crash-loops on any config naming a plugin, and
+# degrades to a silent pass-through proxy on a config naming none. Fail here
+# instead of at deploy. Pass a profile from authbridge/scripts/profile-tags.
 ARG GO_BUILD_TAGS=""
+RUN test -n "${GO_BUILD_TAGS}" || { \
+      echo "GO_BUILD_TAGS is required: plugins are opt-in and an untagged build registers none." >&2; \
+      echo "Pass a profile, e.g. --build-arg GO_BUILD_TAGS=\"\$(go -C scripts/profile-tags run . full)\"" >&2; \
+      exit 1; }
 ENV GOWORK=off
 RUN cd cmd/authbridge-proxy && CGO_ENABLED=0 GOOS=linux go build -tags "${GO_BUILD_TAGS}" -ldflags="-s -w" -o /authbridge-proxy .
 

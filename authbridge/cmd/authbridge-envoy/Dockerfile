@@ -23,7 +23,13 @@ COPY authlib/ authlib/
 COPY storage/ storage/
 COPY cmd/authbridge-envoy/ cmd/authbridge-envoy/
 
+# Plugins are all opt-in; see the note in cmd/authbridge-proxy/Dockerfile. An
+# untagged build registers none, which is never a valid artifact.
 ARG GO_BUILD_TAGS=""
+RUN test -n "${GO_BUILD_TAGS}" || { \
+      echo "GO_BUILD_TAGS is required: plugins are opt-in and an untagged build registers none." >&2; \
+      echo "Pass a profile, e.g. --build-arg GO_BUILD_TAGS=\"\$(go -C scripts/profile-tags run . envoy)\"" >&2; \
+      exit 1; }
 ENV GOWORK=off
 RUN cd cmd/authbridge-envoy && CGO_ENABLED=0 GOOS=linux go build -tags "${GO_BUILD_TAGS}" -ldflags="-s -w" -o /authbridge-envoy .
 

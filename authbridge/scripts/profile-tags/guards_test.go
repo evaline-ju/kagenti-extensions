@@ -8,9 +8,39 @@ import (
 	"testing"
 )
 
-// cmdDir is resolved relative to the process working directory, matching the
-// `go -C <this-module>` convention every call site uses.
-const cmdDir = "../../cmd"
+// cmdDir and repoRoot are resolved relative to the process working directory,
+// matching the `go -C <this-module>` convention every call site uses.
+const (
+	cmdDir   = "../../cmd"
+	repoRoot = "../../.."
+)
+
+// legacyTagEscape exempts a file from the retired-tag-form guard. Prose that
+// legitimately discusses the old convention — a release note, an ADR, a design
+// doc explaining what changed — should not have to choose between being accurate
+// and passing CI, because the easy way out of that is to weaken the guard.
+const legacyTagEscape = "allow-legacy-plugin-tag"
+
+// skipDir reports directories no guard should descend into. .worktrees matters
+// most: sibling worktrees hold other branches, and scanning them would fail this
+// module's tests based on code that is not in this tree.
+func skipDir(name string) bool {
+	switch name {
+	case ".git", "vendor", "node_modules", ".worktrees", ".venv":
+		return true
+	}
+	return false
+}
+
+// buildFile reports whether a file can plausibly name a profile: the workflow,
+// shell and make surfaces that invoke the generator.
+func buildFile(name string) bool {
+	switch filepath.Ext(name) {
+	case ".yaml", ".yml", ".sh":
+		return true
+	}
+	return name == "Makefile" || strings.HasPrefix(name, "Dockerfile")
+}
 
 // blankPluginImport matches a blank import of a plugin package.
 var blankPluginImport = regexp.MustCompile(`_\s+"github\.com/rossoctl/cortex/authbridge/authlib/plugins/(\w+)"`)
@@ -27,13 +57,12 @@ func TestNoExcludePluginTagsRemain(t *testing.T) {
 	// Walk from the repository root, not just authbridge/: the convention is also
 	// described in the top-level CLAUDE.md, LOCAL_TESTING_GUIDE.md and
 	// local-build-and-test.sh, and a stale description there misleads just as much.
-	err := filepath.WalkDir("../../..", func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(repoRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules", ".worktrees", ".venv":
+			if skipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -50,7 +79,11 @@ func TestNoExcludePluginTagsRemain(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		if strings.Contains(string(data), needle) {
+		text := string(data)
+		if strings.Contains(text, legacyTagEscape) {
+			return nil
+		}
+		if strings.Contains(text, needle) {
 			hits = append(hits, path)
 		}
 		return nil
@@ -59,8 +92,10 @@ func TestNoExcludePluginTagsRemain(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 	if len(hits) > 0 {
-		t.Errorf("%d file(s) still reference the removed tag form %q:\n  %s",
-			len(hits), needle, strings.Join(hits, "\n  "))
+		t.Errorf("%d file(s) still reference the removed tag form %q:\n  %s\n\n"+
+			"If a file legitimately discusses the old convention (release note, ADR, "+
+			"design history), add the marker %q to it rather than relaxing this guard.",
+			len(hits), needle, strings.Join(hits, "\n  "), legacyTagEscape)
 	}
 }
 
@@ -200,39 +235,42 @@ var profileInvocations = []*regexp.Regexp{
 // Only literal names are checked; `$1`/`${profile}` indirections are skipped,
 // since their values live in shell loops this cannot evaluate.
 func TestCallSitesUseKnownProfiles(t *testing.T) {
-	roots := []string{"../../../.github/workflows", "../../.."}
 	checked := 0
-	for _, root := range roots {
-		entries, err := os.ReadDir(root)
+	// Walk the whole repository, not just its top level. A stale call site is
+	// exactly what this guard exists for, and one can live in a nested Makefile,
+	// scripts/*.sh or Dockerfile as easily as in .github/workflows.
+	err := filepath.WalkDir(repoRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			continue
+			return err
 		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
+		if d.IsDir() {
+			if skipDir(d.Name()) {
+				return filepath.SkipDir
 			}
-			switch filepath.Ext(e.Name()) {
-			case ".yaml", ".yml", ".sh":
-			default:
-				continue
-			}
-			path := filepath.Join(root, e.Name())
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("read %s: %v", path, err)
-			}
-			for _, re := range profileInvocations {
-				for _, m := range re.FindAllStringSubmatch(string(data), -1) {
-					for _, name := range strings.Fields(m[1]) {
-						checked++
-						if _, ok := profiles[name]; !ok {
-							t.Errorf("%s names profile %q, which is not defined (known: %v)",
-								path, name, known())
-						}
+			return nil
+		}
+		if !buildFile(d.Name()) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, re := range profileInvocations {
+			for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+				for _, name := range strings.Fields(m[1]) {
+					checked++
+					if _, ok := profiles[name]; !ok {
+						t.Errorf("%s names profile %q, which is not defined (known: %v)",
+							path, name, known())
 					}
 				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
 	}
 	if checked == 0 {
 		t.Error("no profile-tags call sites found — either the invocation shape changed " +
