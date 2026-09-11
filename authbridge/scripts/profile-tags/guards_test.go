@@ -21,6 +21,27 @@ const (
 // and passing CI, because the easy way out of that is to weaken the guard.
 const legacyTagEscape = "allow-legacy-plugin-tag"
 
+// blankPluginImport matches a blank import of a plugin package. A regexp rather
+// than an AST walk: it matches inside a grouped import block as well as a single
+// one, since it does not anchor on the `import` keyword. If the registration
+// shape ever loosens beyond `_ "<path>"`, switch to go/ast — see
+// authlib/plugins/injection_coverage_test.go for the pattern.
+var blankPluginImport = regexp.MustCompile(`_\s+"github\.com/rossoctl/cortex/authbridge/authlib/plugins/(\w+)"`)
+
+// profileInvocations match the shapes a call site uses to name a profile. All
+// three deliberately require the name to start with a letter, so a shell
+// indirection (`"${profile}"`, `"$1"`) does not match — those values live in
+// loops this cannot evaluate, and the loop's literal list is caught by the third
+// pattern instead.
+var profileInvocations = []*regexp.Regexp{
+	// Direct: go -C .../profile-tags run . full
+	regexp.MustCompile(`profile-tags run \. "?([a-z][a-z0-9_]*)`),
+	// Via the shell helper both workflows define: profile_tags full
+	regexp.MustCompile(`profile_tags ([a-z][a-z0-9_]*)`),
+	// The loop list in ci.yaml: profiles="local full lite"
+	regexp.MustCompile(`profiles="([a-z0-9_ ]+)"`),
+}
+
 // skipDir reports directories no guard should descend into. .worktrees matters
 // most: sibling worktrees hold other branches, and scanning them would fail this
 // module's tests based on code that is not in this tree.
@@ -32,8 +53,8 @@ func skipDir(name string) bool {
 	return false
 }
 
-// buildFile reports whether a file can plausibly name a profile: the workflow,
-// shell and make surfaces that invoke the generator.
+// buildFile reports whether a file can plausibly carry a build tag or name a
+// profile: the workflow, shell, make and container surfaces that drive builds.
 func buildFile(name string) bool {
 	switch filepath.Ext(name) {
 	case ".yaml", ".yml", ".sh":
@@ -42,8 +63,16 @@ func buildFile(name string) bool {
 	return name == "Makefile" || strings.HasPrefix(name, "Dockerfile")
 }
 
-// blankPluginImport matches a blank import of a plugin package.
-var blankPluginImport = regexp.MustCompile(`_\s+"github\.com/rossoctl/cortex/authbridge/authlib/plugins/(\w+)"`)
+// scannedFile reports whether the retired-tag guard should read a file. It covers
+// buildFile's surfaces plus Go sources and prose: a stale tag in a Dockerfile is
+// a silent no-op, and a stale tag in documentation is a wrong instruction.
+func scannedFile(name string) bool {
+	switch filepath.Ext(name) {
+	case ".go", ".md":
+		return true
+	}
+	return buildFile(name)
+}
 
 // TestNoExcludePluginTagsRemain guards the convention itself. Under all-opt-in
 // nothing links by default, so `exclude_plugin_*` has no meaning — but Go does
@@ -54,9 +83,6 @@ func TestNoExcludePluginTagsRemain(t *testing.T) {
 	// Assembled at runtime so this test file does not match itself.
 	needle := "exclude" + "_plugin_"
 	var hits []string
-	// Walk from the repository root, not just authbridge/: the convention is also
-	// described in the top-level CLAUDE.md, LOCAL_TESTING_GUIDE.md and
-	// local-build-and-test.sh, and a stale description there misleads just as much.
 	err := filepath.WalkDir(repoRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -67,9 +93,7 @@ func TestNoExcludePluginTagsRemain(t *testing.T) {
 			}
 			return nil
 		}
-		switch filepath.Ext(path) {
-		case ".go", ".yaml", ".yml", ".sh", ".md":
-		default:
+		if !scannedFile(d.Name()) {
 			return nil
 		}
 		if strings.HasSuffix(path, "guards_test.go") {
@@ -99,6 +123,32 @@ func TestNoExcludePluginTagsRemain(t *testing.T) {
 	}
 }
 
+// TestEveryPluginFileIsTagged closes the gap that would reintroduce the very bug
+// this convention removes. A file named plugins_foo.go with a blank import and NO
+// build directive is skipped by the unconditional-import guard (it matches the
+// plugins_ prefix) and invisible to discoverPlugins (no directive to find), so it
+// links its plugin into every artifact unconditionally and nothing reports it.
+func TestEveryPluginFileIsTagged(t *testing.T) {
+	files, err := pluginFiles(cmdDir)
+	if err != nil {
+		t.Fatalf("pluginFiles: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no plugins_*.go files found — the registration convention changed " +
+			"and this guard went blind")
+	}
+	for _, path := range files {
+		name, err := extractIncludeSuffix(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if name == "" {
+			t.Errorf("%s has no `//go:build include_plugin_<name>` directive, so its "+
+				"plugin links unconditionally into every profile", path)
+		}
+	}
+}
+
 // TestNoUnconditionalPluginImports guards the hole that shipped in
 // authbridge-envoy and authbridge-cpex: both blank-imported plugin packages
 // straight from main.go, so those plugins could not be excluded by any tag and
@@ -119,6 +169,8 @@ func TestNoUnconditionalPluginImports(t *testing.T) {
 		}
 		for _, f := range goFiles {
 			base := filepath.Base(f)
+			// plugins_*.go files are the sanctioned entry point; that they actually
+			// carry a directive is TestEveryPluginFileIsTagged's job.
 			if strings.HasPrefix(base, "plugins_") || strings.HasSuffix(base, "_test.go") {
 				continue
 			}
@@ -137,39 +189,8 @@ func TestNoUnconditionalPluginImports(t *testing.T) {
 	}
 }
 
-// TestEveryPluginIsAccountedFor is the guard against a plugin silently vanishing
-// from production. Under opt-out, a new plugin reached every artifact for free;
-// under opt-in a forgotten manifest entry means it reaches none, and nothing
-// fails. Every plugin discovered in the tree must be named by a profile or
-// listed as deliberately optional.
-func TestEveryPluginIsAccountedFor(t *testing.T) {
-	found, err := discoverPlugins(cmdDir)
-	if err != nil {
-		t.Fatalf("discoverPlugins: %v", err)
-	}
-	if len(found) == 0 {
-		t.Fatal("no plugins discovered — the build-tag convention changed and this guard went blind")
-	}
-	inProfile := map[string]bool{}
-	for _, names := range profiles {
-		for _, n := range names {
-			inProfile[n] = true
-		}
-	}
-	var orphans []string
-	for _, n := range found {
-		if !inProfile[n] && !optional[n] {
-			orphans = append(orphans, n)
-		}
-	}
-	if len(orphans) > 0 {
-		t.Errorf("plugin(s) in no profile and not marked optional: %s", strings.Join(orphans, ", "))
-	}
-}
-
 // reservedFileSuffixes are the GOOS and GOARCH tokens Go treats as an implicit
-// build constraint when they appear as a filename suffix. Only the ones a plugin
-// name could plausibly collide with are listed; extend when a new plugin trips it.
+// build constraint when they appear as a filename suffix.
 var reservedFileSuffixes = map[string]bool{
 	"aix": true, "android": true, "darwin": true, "dragonfly": true,
 	"freebsd": true, "hurd": true, "illumos": true, "ios": true, "js": true,
@@ -185,45 +206,112 @@ var reservedFileSuffixes = map[string]bool{
 // causes. A file named plugins_sparc.go carries an implicit GOARCH=sparc
 // constraint, so it compiles on no normal machine — the plugin vanishes with no
 // build error, and a tag-scanning guard still "finds" it because the directive is
-// right there in the source. cmd/authbridge-proxy already works around this by
+// right there in the source. cmd/authbridge-proxy already worked around this by
 // naming its file plugins_sparcplugin.go; nothing enforced it until now.
 func TestNoPluginFileShadowedByGOOSGOARCH(t *testing.T) {
-	entries, err := os.ReadDir(cmdDir)
+	files, err := pluginFiles(cmdDir)
 	if err != nil {
-		t.Fatalf("read %s: %v", cmdDir, err)
+		t.Fatalf("pluginFiles: %v", err)
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	for _, path := range files {
+		base := strings.TrimSuffix(filepath.Base(path), ".go")
+		suffix := base[strings.LastIndex(base, "_")+1:]
+		if reservedFileSuffixes[suffix] {
+			t.Errorf("%s: filename suffix %q is a GOOS/GOARCH token, so Go excludes "+
+				"this file on every other platform and the plugin is silently dropped; "+
+				"rename it (e.g. plugins_%splugin.go)", path, suffix, suffix)
 		}
-		matches, err := filepath.Glob(filepath.Join(cmdDir, e.Name(), "plugins_*.go"))
-		if err != nil {
-			t.Fatalf("glob: %v", err)
+	}
+}
+
+// TestEveryPluginIsAccountedFor is the guard against a plugin silently vanishing
+// from production. Under opt-out, a new plugin reached every artifact for free;
+// under opt-in a missing membership entry means it reaches none, and nothing
+// fails. Every plugin discovered in the tree must have an entry — one listing
+// profiles, or an empty one marking it deliberately optional.
+func TestEveryPluginIsAccountedFor(t *testing.T) {
+	found, err := discoverPlugins(cmdDir)
+	if err != nil {
+		t.Fatalf("discoverPlugins: %v", err)
+	}
+	if len(found) == 0 {
+		t.Fatal("no plugins discovered — the build-tag convention changed and this guard went blind")
+	}
+	for _, n := range found {
+		if _, ok := membership[n]; !ok {
+			t.Errorf("plugin %q has no membership entry: name the profiles that carry "+
+				"it, or give it an empty entry to mark it deliberately optional", n)
 		}
-		for _, path := range matches {
-			base := strings.TrimSuffix(filepath.Base(path), ".go")
-			suffix := base[strings.LastIndex(base, "_")+1:]
-			if reservedFileSuffixes[suffix] {
-				t.Errorf("%s: filename suffix %q is a GOOS/GOARCH token, so Go excludes "+
-					"this file on every other platform and the plugin is silently dropped; "+
-					"rename it (e.g. plugins_%splugin.go)", path, suffix, suffix)
+	}
+}
+
+// TestOptionalSetIsExplicit pins which plugins deliberately ship in no artifact.
+// TestEveryPluginIsAccountedFor only requires an entry to exist, so a plugin
+// whose last profile is removed still passes there while quietly disappearing
+// from every image. Shipping nothing has to be a decision recorded here, not a
+// side effect of editing one profile.
+func TestOptionalSetIsExplicit(t *testing.T) {
+	want := map[PluginName]bool{
+		"contextguru":   true, // ~16 MiB: bifrost/core, tiktoken-go, tree-sitter, starlark
+		"sessionbudget": true, // ~6 MiB: go-redis
+	}
+	for plugin := range membership {
+		switch {
+		case isOptional(plugin) && !want[plugin]:
+			t.Errorf("plugin %q is carried by no profile, so it ships in no artifact. "+
+				"If that is intended, add it to this test's want set; otherwise name "+
+				"the profiles that carry it", plugin)
+		case !isOptional(plugin) && want[plugin]:
+			t.Errorf("plugin %q is expected to be optional but now names profiles %v; "+
+				"remove it from this test's want set if that is intended",
+				plugin, membership[plugin])
+		}
+	}
+}
+
+// TestNoStaleMembershipEntries is the mirror: an entry naming a plugin that no
+// longer exists yields `-tags include_plugin_gone`, which Go accepts silently, so
+// the artifact quietly ships without it.
+func TestNoStaleMembershipEntries(t *testing.T) {
+	found, err := discoverPlugins(cmdDir)
+	if err != nil {
+		t.Fatalf("discoverPlugins: %v", err)
+	}
+	exists := map[PluginName]bool{}
+	for _, n := range found {
+		exists[n] = true
+	}
+	for plugin := range membership {
+		if !exists[plugin] {
+			t.Errorf("membership names %q, which has no plugins_%s.go anywhere under %s",
+				plugin, plugin, cmdDir)
+		}
+	}
+}
+
+// TestMembershipNamesKnownProfiles catches a typo in a membership entry. Because
+// Tags filters rather than looks up, an unknown profile name there would not
+// error — it would simply carry the plugin nowhere.
+func TestMembershipNamesKnownProfiles(t *testing.T) {
+	for plugin, carriedBy := range membership {
+		for _, p := range carriedBy {
+			if !isKnownProfile(p) {
+				t.Errorf("plugin %q names profile %q, which is not defined (known: %v)",
+					plugin, p, known())
 			}
 		}
 	}
 }
 
-// profileInvocations match the shapes a call site uses to name a profile. All
-// three deliberately require the name to start with a letter, so a shell
-// indirection (`"${profile}"`, `"$1"`) does not match — those values live in
-// loops this cannot evaluate, and the loop's literal list is caught by the third
-// pattern instead.
-var profileInvocations = []*regexp.Regexp{
-	// Direct: go -C .../profile-tags run . full
-	regexp.MustCompile(`profile-tags run \. "?([a-z][a-z0-9_]*)`),
-	// Via the shell helper both workflows define: profile_tags full
-	regexp.MustCompile(`profile_tags ([a-z][a-z0-9_]*)`),
-	// The loop list in ci.yaml: profiles="local full lite"
-	regexp.MustCompile(`profiles="([a-z0-9_ ]+)"`),
+// TestEveryProfileCarriesSomething — a profile no plugin names resolves to an
+// empty tag list. Tags fails closed on that, but only when something asks for it;
+// this reports it at test time instead of mid-build.
+func TestEveryProfileCarriesSomething(t *testing.T) {
+	for _, p := range allProfiles {
+		if _, err := Tags(p); err != nil {
+			t.Errorf("profile %q: %v", p, err)
+		}
+	}
 }
 
 // TestCallSitesUseKnownProfiles guards the failure this refactor actually hit:
@@ -231,9 +319,6 @@ var profileInvocations = []*regexp.Regexp{
 // deleted generator, because a broken call site contains no build tag to find. A
 // profile name is a string in YAML and shell — a typo or a rename produces a
 // non-zero exit deep in a build, or worse an empty tag list.
-//
-// Only literal names are checked; `$1`/`${profile}` indirections are skipped,
-// since their values live in shell loops this cannot evaluate.
 func TestCallSitesUseKnownProfiles(t *testing.T) {
 	checked := 0
 	// Walk the whole repository, not just its top level. A stale call site is
@@ -260,7 +345,7 @@ func TestCallSitesUseKnownProfiles(t *testing.T) {
 			for _, m := range re.FindAllStringSubmatch(string(data), -1) {
 				for _, name := range strings.Fields(m[1]) {
 					checked++
-					if _, ok := profiles[name]; !ok {
+					if !isKnownProfile(ProfileName(name)) {
 						t.Errorf("%s names profile %q, which is not defined (known: %v)",
 							path, name, known())
 					}
@@ -275,32 +360,5 @@ func TestCallSitesUseKnownProfiles(t *testing.T) {
 	if checked == 0 {
 		t.Error("no profile-tags call sites found — either the invocation shape changed " +
 			"or CI stopped resolving profiles, and this guard went blind")
-	}
-}
-
-// TestNoStaleProfileEntries is the mirror: a profile naming a plugin that no
-// longer exists yields `-tags include_plugin_gone`, which Go accepts silently,
-// so the artifact quietly ships without it.
-func TestNoStaleProfileEntries(t *testing.T) {
-	found, err := discoverPlugins(cmdDir)
-	if err != nil {
-		t.Fatalf("discoverPlugins: %v", err)
-	}
-	exists := map[string]bool{}
-	for _, n := range found {
-		exists[n] = true
-	}
-	for profile, names := range profiles {
-		for _, n := range names {
-			if !exists[n] {
-				t.Errorf("profile %q names %q, which has no plugins_%s.go anywhere under %s",
-					profile, n, n, cmdDir)
-			}
-		}
-	}
-	for n := range optional {
-		if !exists[n] {
-			t.Errorf("optional names %q, which has no plugins_%s.go anywhere under %s", n, n, cmdDir)
-		}
 	}
 }

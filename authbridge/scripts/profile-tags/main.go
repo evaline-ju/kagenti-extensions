@@ -35,7 +35,7 @@ func run(args []string) (string, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("usage: profile-tags <profile> (known: %v)", known())
 	}
-	tags, err := Tags(args[0])
+	tags, err := Tags(ProfileName(args[0]))
 	if err != nil {
 		return "", err
 	}

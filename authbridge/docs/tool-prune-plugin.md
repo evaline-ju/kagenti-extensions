@@ -330,5 +330,6 @@ it happens on the change and then the prefix is stable again.
 ## Build tag
 
 Opt-in like every plugin: link it with `-tags include_plugin_toolprune`. It is in
-the `local` and `full` profiles but not `lite`, which carries only the
-credential/identity plugins. See `authbridge/scripts/profile-tags`.
+the `local` and `full` profiles but not `lite`, the sidecar-minimum set
+(jwt-validation, token-exchange, litellm-budget-track, static-inject). See
+`authbridge/scripts/profile-tags`.

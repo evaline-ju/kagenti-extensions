@@ -12,7 +12,7 @@ import (
 // config never names or names plugins the binary cannot load, and the latter is
 // a refuse-to-start (`unknown plugin ...`) rather than a degraded feature.
 func TestTags_Local(t *testing.T) {
-	got, err := Tags("local")
+	got, err := Tags(ProfileLocal)
 	if err != nil {
 		t.Fatalf("Tags(local): %v", err)
 	}
@@ -54,7 +54,7 @@ func TestTags_ReproduceTodaysDefaults(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.profile, func(t *testing.T) {
-			got, err := Tags(tc.profile)
+			got, err := Tags(ProfileName(tc.profile))
 			if err != nil {
 				t.Fatalf("Tags(%s): %v", tc.profile, err)
 			}
@@ -74,7 +74,7 @@ func TestTags_ReproduceTodaysDefaults(t *testing.T) {
 // TestTags_UnknownProfile — a typo in CI must fail the build, not silently
 // produce an empty tag list that links no plugins at all.
 func TestTags_UnknownProfile(t *testing.T) {
-	if _, err := Tags("desktop"); err == nil {
+	if _, err := Tags(ProfileName("desktop")); err == nil {
 		t.Fatal("want error for an undefined profile, got nil")
 	}
 }
