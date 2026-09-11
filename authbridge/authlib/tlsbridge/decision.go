@@ -342,25 +342,6 @@ func (s *SkipSet) Succeed(host string) {
 	delete(s.m, host)
 }
 
-// window is the time left on a host's skip, or zero when it is not skipped.
-//
-// Unexported: it exists for this package's tests, and the proxy only ever asks Contains.
-// It was briefly exported so a forwardproxy test could assert on backoff, which widened
-// authlib's public API for a test-only need — the assertions that wanted it live here
-// now instead, where the internals already are.
-func (s *SkipSet) window(host string) time.Duration {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	e, ok := s.m[host]
-	if !ok {
-		return 0
-	}
-	if d := time.Until(e.expiry); d > 0 {
-		return d
-	}
-	return 0
-}
-
 func (s *SkipSet) Contains(host string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
