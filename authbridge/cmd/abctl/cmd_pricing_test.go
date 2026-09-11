@@ -71,20 +71,25 @@ func TestRunPricing_UnscaledEndpointSaysSo(t *testing.T) {
 	if !strings.Contains(got, "no gateway discount") {
 		t.Errorf("expected the no-discount note: %s", got)
 	}
-	// UNSCALED vendor list for opus-5: 5 in, 25 out. Asserted as a whole row, because
-	// "5" alone also matches the model name "claude-opus-5" and so proves nothing — and
-	// specifically NOT the discounted 3.8/19, which is what a multiplier leaking onto
-	// api.anthropic.com would print here.
-	row := modelRow(t, got, "claude-opus-5")
-	for _, want := range []string{"5", "25"} {
-		if !strings.Contains(row, want) {
-			t.Errorf("opus-5 row %q missing list rate %q", row, want)
-		}
+	// UNSCALED vendor list for opus-5: 5 in, 25 out. Asserted by COLUMN, not by
+	// Contains: "5" is a substring of the model name "claude-opus-5" and of "25", so a
+	// containment check on either the output or the row proves nothing at all.
+	//
+	// Columns are: model, input, cache-write, cache-read, output, provenance.
+	f := strings.Fields(modelRow(t, got, "claude-opus-5"))
+	if len(f) < 6 {
+		t.Fatalf("opus-5 row has %d columns, want 6: %q", len(f), f)
 	}
-	for _, unwanted := range []string{"3.8", "19"} {
-		if strings.Contains(row, unwanted) {
-			t.Errorf("opus-5 row %q carries the discounted rate %q on an undiscounted endpoint", row, unwanted)
-		}
+	if f[1] != "5" {
+		t.Errorf("input column = %q, want the list rate 5", f[1])
+	}
+	if f[4] != "25" {
+		t.Errorf("output column = %q, want the list rate 25", f[4])
+	}
+	// And specifically NOT the discounted figures, which is what a multiplier leaking
+	// onto api.anthropic.com would print here.
+	if f[1] == "3.8" || f[4] == "19" {
+		t.Errorf("opus-5 carries discounted rates on an undiscounted endpoint: %q", f)
 	}
 }
 
@@ -136,4 +141,30 @@ func TestRunPricing_ProxyDownIsActionable(t *testing.T) {
 	if !strings.Contains(errb.String(), "abctl service status") {
 		t.Errorf("error does not tell the operator what to check: %s", errb.String())
 	}
+}
+
+// The raw view must not present a two-tier row as a one-tier answer. Four bundled models
+// carry a 200k override; the wire has always had them and the renderer used to drop them.
+func TestRunPricing_TableViewShowsLongContextOverrides(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := runPricing([]string{"--stats-url", realStatServer(t)}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "above 200,000 tok:") {
+		t.Errorf("no long-context override line in the raw view:\n%s", tail(got))
+	}
+	// The override rate itself, not just the breakpoint: sonnet-4-5's 200k input
+	// premium is 6.00/Mtok at list, and the raw view is unscaled.
+	if !strings.Contains(got, "        6 ") {
+		t.Errorf("override line does not carry the premium rate 6:\n%s", tail(got))
+	}
+}
+
+func tail(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > 12 {
+		lines = lines[len(lines)-12:]
+	}
+	return strings.Join(lines, "\n")
 }

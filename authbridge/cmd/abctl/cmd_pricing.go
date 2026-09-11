@@ -159,16 +159,30 @@ func rate(v float64) string {
 	return fmt.Sprintf("%.4g", v)
 }
 
+// thresholdRow is one long-context override on a raw row.
+//
+// Rendered rather than dropped: the raw view already warns that its rates are unscaled,
+// and staying silent about a second tier would leave the same gap in the other direction
+// — a figure presented as the whole answer when a longer request is charged more.
+type thresholdRow struct {
+	Above int     `json:"abovePromptTokens"`
+	In    float64 `json:"inputPerMillion"`
+	CW    float64 `json:"cacheWritePerMillion"`
+	CR    float64 `json:"cacheReadPerMillion"`
+	Out   float64 `json:"outputPerMillion"`
+}
+
 type describeBody struct {
 	UpstreamCommit string `json:"upstreamCommit"`
 	Rows           []struct {
-		Host       string  `json:"host"`
-		Model      string  `json:"model"`
-		Provenance string  `json:"provenance"`
-		In         float64 `json:"inputPerMillion"`
-		CW         float64 `json:"cacheWritePerMillion"`
-		CR         float64 `json:"cacheReadPerMillion"`
-		Out        float64 `json:"outputPerMillion"`
+		Host       string         `json:"host"`
+		Model      string         `json:"model"`
+		Provenance string         `json:"provenance"`
+		In         float64        `json:"inputPerMillion"`
+		CW         float64        `json:"cacheWritePerMillion"`
+		CR         float64        `json:"cacheReadPerMillion"`
+		Out        float64        `json:"outputPerMillion"`
+		Thresholds []thresholdRow `json:"thresholds"`
 	} `json:"rows"`
 	Multipliers []struct {
 		Host       string  `json:"host"`
@@ -196,6 +210,14 @@ func renderTable(body []byte, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "  %-22s %-30s %9s %9s %9s %9s  %s\n", h, r.Model,
 			rate(r.In), rate(r.CW), rate(r.CR), rate(r.Out), r.Provenance)
+		// Overrides on a continuation line, so the row above is not silently the
+		// below-threshold half of a two-tier answer. A tier the override leaves unset
+		// renders "-", meaning "inherits the row above", which is what At() does.
+		for _, th := range r.Thresholds {
+			fmt.Fprintf(stdout, "  %-22s   %-28s %9s %9s %9s %9s\n", "",
+				"above "+commas(th.Above)+" tok:",
+				rate(th.In), rate(th.CW), rate(th.CR), rate(th.Out))
+		}
 	}
 	if len(d.Multipliers) > 0 {
 		fmt.Fprintf(stdout, "\nGateway discounts\n\n  %-30s %8s  %s\n", "endpoint", "factor", "from")

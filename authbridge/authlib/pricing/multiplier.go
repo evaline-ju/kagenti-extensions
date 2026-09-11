@@ -59,26 +59,35 @@ func (m MultiplierRule) validate(what string) error {
 	return nil
 }
 
-// scale returns r with every set rate multiplied.
+// scale returns r with every set rate multiplied — Base and any long-context override.
 //
-// Long-context premiums scale too, and the ORDERING is what makes that true rather than
-// anything in this function: Resolve flattens with At(promptTotal) first, so whichever
-// threshold applies has already been folded into Base by the time scale runs. Missing
-// that would leave a discounted gateway correct below its breakpoint and wrong above it,
-// which shows up as an unexplained jump in reported cost on long sessions.
+// Resolve calls this on ALREADY-FLATTENED rates, so in that path Thresholds is empty and
+// the loop below does nothing. It is still written to scale them, because the alternative
+// readings are both wrong for any other caller: passing thresholds through unscaled
+// leaves one Rates value carrying two different scales, so a later At() would fold a
+// list-price premium onto a discounted base; dropping them loses the premium entirely and
+// silently underprices long requests. A discounted gateway discounts its long-context
+// tier too.
 //
-// An earlier version also walked r.Thresholds here. That branch was unreachable —
-// proven by putting a panic in it and watching the whole suite pass, including the test
-// that appeared to cover it — so it was removed rather than left to imply a guarantee it
-// never provided. If a caller ever scales UNFLATTENED rates, it needs adding back with a
-// test that reaches it.
+// Unreachable from Resolve is not the same as untested — TestRates_ScaleScalesThresholds
+// calls it directly, so the branch has coverage independent of its caller.
 func (r Rates) scale(f float64) Rates {
 	if f == 1 {
 		return r
 	}
-	out := Rates{Set: r.Set, Thresholds: r.Thresholds}
+	out := Rates{Set: r.Set}
 	for i := range r.Base {
 		out.Base[i] = r.Base[i] * f
+	}
+	if len(r.Thresholds) > 0 {
+		out.Thresholds = make([]ContextThreshold, len(r.Thresholds))
+		for i, th := range r.Thresholds {
+			scaled := ContextThreshold{AbovePromptTokens: th.AbovePromptTokens, Set: th.Set}
+			for tier := range th.Rate {
+				scaled.Rate[tier] = th.Rate[tier] * f
+			}
+			out.Thresholds[i] = scaled
+		}
 	}
 	return out
 }

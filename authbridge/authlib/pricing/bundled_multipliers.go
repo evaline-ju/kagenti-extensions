@@ -19,6 +19,17 @@ package pricing
 // operator with different terms overrides with one line, which outranks this.
 func bundledMultipliers() []MultiplierRule {
 	return []MultiplierRule{{
+		// WHAT THIS NUMBER IS, so that nobody edits it thinking it is a rounding
+		// constant: it is the fraction of vendor list that IBM's internal LiteLLM
+		// gateways bill, and shipping it here states that in a public repository. That
+		// was a deliberate call by the maintainers, not an oversight — but it is still a
+		// statement about one organisation's pricing, so treat a change to this line as
+		// a disclosure decision and not a data refresh, and do not widen the host
+		// pattern to gateways whose terms have not been cleared the same way.
+		//
+		// Another gateway's factor belongs in `pricing.endpoints[].multiplier`, or in a
+		// rule of its own. Do not repurpose this one.
+		//
 		// Measured 2026-09-10 by differencing x-litellm-response-cost-original across
 		// paired non-streamed calls: input, cache-write, cache-read and output, for
 		// opus-5, sonnet-5 and haiku-4-5, all came to exactly 0.7600 of the

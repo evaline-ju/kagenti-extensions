@@ -204,5 +204,54 @@ func TestMultiplier_ConfiguredCatchAllOutranksShippedSpecific(t *testing.T) {
 		if got := perM(rates, TierInput); got != 5 {
 			t.Errorf("input = %v/Mtok, want the unscaled 5 (prov %v)", got, prov)
 		}
+		// Reported CONFIGURED, not bundled. Writing `multiplier: 1.0` is an operator
+		// telling us their endpoint bills at list — the same act as writing 0.76 — so
+		// reporting bundled would send them a WarnIfUnpinned line about the endpoint
+		// they just pinned.
+		if prov != ProvConfigured {
+			t.Errorf("provenance = %v, want configured for a deliberate 1.0 pin", prov)
+		}
 	})
+}
+
+// scale is unreachable from Resolve with thresholds present, because Resolve flattens
+// first. Tested directly anyway: "no caller reaches it today" is how the previous version
+// came to pass thresholds through unscaled without anything noticing.
+//
+// 0.5 is used deliberately — halving is exact in binary, so these are equalities rather
+// than tolerances.
+func TestRates_ScaleScalesThresholds(t *testing.T) {
+	var r Rates
+	r.Base[TierInput] = 10e-6
+	r.Set[TierInput] = true
+	r.Thresholds = []ContextThreshold{{AbovePromptTokens: 200_000}}
+	r.Thresholds[0].Rate[TierInput] = 15e-6
+	r.Thresholds[0].Set[TierInput] = true
+
+	got := r.scale(0.5)
+	if got.Base[TierInput] != 5e-6 {
+		t.Errorf("base = %v, want 5e-6", got.Base[TierInput])
+	}
+	if len(got.Thresholds) != 1 {
+		t.Fatalf("thresholds dropped: %+v", got.Thresholds)
+	}
+	if got.Thresholds[0].Rate[TierInput] != 7.5e-6 {
+		t.Errorf("threshold rate = %v, want 7.5e-6 — a discounted gateway discounts its long-context tier too",
+			got.Thresholds[0].Rate[TierInput])
+	}
+	if r.Thresholds[0].Rate[TierInput] != 15e-6 {
+		t.Errorf("scale mutated the receiver's thresholds: %v", r.Thresholds[0].Rate[TierInput])
+	}
+
+	// The property that makes the ordering safe: scaling and flattening COMMUTE. Resolve
+	// flattens then scales; any other caller may scale then flatten. Both must charge the
+	// same, which is exactly what passing thresholds through unscaled broke.
+	a := r.At(500_000).scale(0.5)
+	b := r.scale(0.5).At(500_000)
+	if a.Base != b.Base || a.Set != b.Set {
+		t.Errorf("scale and At do not commute:\n flatten-then-scale %v\n scale-then-flatten %v", a.Base, b.Base)
+	}
+	if b.Base[TierInput] != 7.5e-6 {
+		t.Errorf("above the threshold = %v, want the scaled premium 7.5e-6", b.Base[TierInput])
+	}
 }

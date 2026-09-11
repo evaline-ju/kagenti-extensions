@@ -386,18 +386,7 @@ func (t *Table) Resolve(endpoint, model string, promptTotal int) (Rates, Provena
 	if t == nil {
 		return Rates{}, ProvNone
 	}
-	// Built once per request, not per row: every row matches against the same forms.
-	forms := modelNameForms(strings.ToLower(strings.TrimSpace(model)))
-	var best *row
-	for i := range t.rows {
-		r := &t.rows[i]
-		if !matchHost(r.host, endpoint) || !r.model.match(forms) {
-			continue
-		}
-		if best == nil || r.prov > best.prov || (r.prov == best.prov && r.spec.beats(best.spec)) {
-			best = r
-		}
-	}
+	best := t.bestRow(endpoint, model)
 	if best == nil {
 		return Rates{}, ProvNone
 	}
@@ -411,13 +400,44 @@ func (t *Table) Resolve(endpoint, model string, promptTotal int) (Rates, Provena
 	// gateway, so reporting bundled would send them to pin rates they have effectively
 	// already pinned. The weaker reading looks more conservative and is in fact less
 	// informative.
-	if f, mprov := t.multiplierFor(endpoint); f != 1 {
+	f, mprov := t.multiplierFor(endpoint)
+	// Provenance is bumped OUTSIDE the f != 1 guard. An operator who writes
+	// `multiplier: 1.0` to say "this endpoint bills at list" has told us about their
+	// gateway just as much as one who writes 0.76 — that is the whole rationale above —
+	// and gating the bump on the factor being interesting would report their deliberate
+	// pin as bundled, then send them a WarnIfUnpinned line telling them to pin it.
+	// multiplierFor returns ProvNone when nothing matches, so this is a no-op then.
+	if mprov > prov {
+		prov = mprov
+	}
+	if f != 1 {
 		rates = rates.scale(f)
-		if mprov > prov {
-			prov = mprov
-		}
 	}
 	return rates, prov
+}
+
+// bestRow picks the row that wins for one (endpoint, model) pair, or nil.
+//
+// Shared with the describe path rather than reimplemented there: two copies of this
+// ranking would diverge the first time it is touched, and the divergence would be silent
+// — a marker or an annotation attached to a different row than the one being charged.
+func (t *Table) bestRow(endpoint, model string) *row {
+	if t == nil {
+		return nil
+	}
+	// Built once per call, not per row: every row matches against the same forms.
+	forms := modelNameForms(strings.ToLower(strings.TrimSpace(model)))
+	var best *row
+	for i := range t.rows {
+		r := &t.rows[i]
+		if !matchHost(r.host, endpoint) || !r.model.match(forms) {
+			continue
+		}
+		if best == nil || r.prov > best.prov || (r.prov == best.prov && r.spec.beats(best.spec)) {
+			best = r
+		}
+	}
+	return best
 }
 
 var _ Resolver = (*Table)(nil)

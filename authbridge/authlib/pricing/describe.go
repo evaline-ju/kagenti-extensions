@@ -1,9 +1,6 @@
 package pricing
 
-import (
-	"sort"
-	"strings"
-)
+import "sort"
 
 // This file exists because a config file cannot answer the question operators
 // actually have.
@@ -214,23 +211,12 @@ func (r *Registry) EffectiveFor(host string) Effective {
 // lowestThresholdFor reports the smallest long-context breakpoint on the row that would
 // win for this endpoint and model, or 0 if it has none.
 //
-// Resolves the row the same way Resolve does, then reads its thresholds before
-// flattening — which is the only place they survive.
+// Selects through Table.bestRow — the same ranking Resolve uses, not a copy of it — then
+// reads the thresholds off the row, which is the only place they survive: Resolve
+// flattens with At(promptTotal) before returning, so by then the applicable one has been
+// folded into Base and the rest are gone.
 func (t *Table) lowestThresholdFor(endpoint, model string) int {
-	if t == nil {
-		return 0
-	}
-	forms := modelNameForms(strings.ToLower(strings.TrimSpace(model)))
-	var best *row
-	for i := range t.rows {
-		r := &t.rows[i]
-		if !matchHost(r.host, endpoint) || !r.model.match(forms) {
-			continue
-		}
-		if best == nil || r.prov > best.prov || (r.prov == best.prov && r.spec.beats(best.spec)) {
-			best = r
-		}
-	}
+	best := t.bestRow(endpoint, model)
 	if best == nil {
 		return 0
 	}
