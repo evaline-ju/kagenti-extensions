@@ -36,6 +36,7 @@ type Option func(*statServerOpts)
 
 type statServerOpts struct {
 	reloadStatus http.Handler
+	pricingTable http.Handler
 }
 
 // WithReloadStatus registers a /reload/status handler (typically the
@@ -43,6 +44,16 @@ type statServerOpts struct {
 // reload isn't wired up — the endpoint simply won't exist.
 func WithReloadStatus(h http.Handler) Option {
 	return func(o *statServerOpts) { o.reloadStatus = h }
+}
+
+// WithPricingTable registers a /pricing/table handler (typically the Handler returned
+// by an authlib/pricing.Registry). Omit when pricing isn't wired up.
+//
+// It answers what a config file cannot: the rates in effect come from the operator's
+// `pricing:` section PLUS a table compiled into the binary PLUS any shipped gateway
+// discount, so reading the config describes only the part the operator wrote.
+func WithPricingTable(h http.Handler) Option {
+	return func(o *statServerOpts) { o.pricingTable = h }
 }
 
 // NewStatServer builds the stat HTTP server. configProvider is
@@ -62,6 +73,9 @@ func NewStatServer(addr string, configProvider ConfigProvider, statsProvider Sta
 	if o.reloadStatus != nil {
 		mux.Handle("/reload/status", o.reloadStatus)
 	}
+	if o.pricingTable != nil {
+		mux.Handle("/pricing/table", o.pricingTable)
+	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -73,6 +87,7 @@ func NewStatServer(addr string, configProvider ConfigProvider, statsProvider Sta
     <li><a href="/config">Rossoctl AuthBridge configuration</a></li>
     <li><a href="/stats">Rossoctl AuthBridge statistics</a></li>
     <li><a href="/reload/status">Config reload status</a></li>
+    <li><a href="/pricing/table">Pricing table</a> (add <code>?host=&lt;gateway&gt;</code> for the rates that endpoint is actually charged)</li>
     </ul>
   </body>
 </html>`)

@@ -39,6 +39,17 @@ type EndpointConfig struct {
 	// Models maps a model glob to its rates. Keys are matched
 	// case-insensitively, and an exact key beats a glob.
 	Models map[string]ModelConfig `yaml:"models" json:"models,omitempty"`
+
+	// Multiplier scales every rate that resolves for these hosts. Absent means 1.0.
+	//
+	// A FRACTION of the resolved rate, so a 24% discount is 0.76. This is the whole
+	// configuration most deployments need: a gateway discount is one scalar, and
+	// stating it once tracks upstream repricing instead of freezing last quarter's
+	// numbers into a copied rate card. See MultiplierRule.
+	//
+	// An endpoint with a multiplier needs no models block — it scales what already
+	// resolves, including models no entry names.
+	Multiplier *float64 `yaml:"multiplier" json:"multiplier,omitempty"`
 }
 
 // ModelConfig is one model pattern's rates, optionally with long-context
@@ -105,8 +116,14 @@ func (c *Config) BundledEnabled() bool {
 // at equal specificity: an override is an override.
 func Build(cfg *Config) (*Table, error) {
 	var entries []Entry
+	var mults []MultiplierRule
 	if cfg.BundledEnabled() {
 		entries = append(entries, Bundled()...)
+		// Shipped gateway discounts travel with the shipped rates: the rates are
+		// vendor list, and for the gateways named here list is a third too high.
+		// Disabling the bundled table disables both, which is the right pairing —
+		// a multiplier on rates you did not ship scales somebody else's numbers.
+		mults = append(mults, bundledMultipliers()...)
 	}
 	if cfg != nil {
 		configured, err := cfg.entries()
@@ -114,8 +131,30 @@ func Build(cfg *Config) (*Table, error) {
 			return nil, err
 		}
 		entries = append(entries, configured...)
+		mults = append(mults, cfg.multipliers()...)
 	}
-	return NewTable(entries)
+	return NewTable(entries, mults...)
+}
+
+// multipliers converts the config's endpoint blocks into multiplier rules.
+func (c *Config) multipliers() []MultiplierRule {
+	if c == nil {
+		return nil
+	}
+	var out []MultiplierRule
+	for _, ep := range c.Endpoints {
+		if ep.Multiplier == nil {
+			continue
+		}
+		hosts := ep.Hosts
+		if len(hosts) == 0 {
+			hosts = []string{""}
+		}
+		for _, h := range hosts {
+			out = append(out, MultiplierRule{Host: h, Factor: *ep.Multiplier, Prov: ProvConfigured})
+		}
+	}
+	return out
 }
 
 // entries converts the config's endpoint/model blocks into table rows.
@@ -137,7 +176,12 @@ func (c *Config) entries() ([]Entry, error) {
 			}
 		}
 		if len(ep.Models) == 0 {
-			return nil, fmt.Errorf("%s: no models configured; an endpoint block with no rates prices nothing", where)
+			if ep.Multiplier != nil {
+				// A multiplier-only block scales what already resolves, so demanding
+				// rates here would defeat the point of expressing a discount once.
+				continue
+			}
+			return nil, fmt.Errorf("%s: no models or multiplier configured; an endpoint block with neither prices nothing", where)
 		}
 		// Sorted so a config with several faults reports the same one across
 		// restarts, instead of whichever map iteration reached first.
@@ -265,7 +309,8 @@ func (c *Config) WarnIfUnpinned(log *slog.Logger) {
 		return // the operator has pinned something
 	}
 	log.Warn("pricing: every endpoint will price from the bundled table, which ships VENDOR LIST rates",
-		"effect", "a gateway that bills below list is OVERSTATED (the reference gateway differs by 1.32x)",
-		"fix", "add a pricing.endpoints entry for your gateway; see docs/plugin-catalog.md",
+		"effect", "a gateway that bills below list is OVERSTATED — measured at 0.76x list on the shipped gateways, so ~1.32x high without a multiplier",
+		"fix", "set pricing.endpoints[].multiplier for your gateway (one scalar; 0.76 means a 24% discount), or per-model rates; see docs/plugin-catalog.md",
+		"note", "gateways matching the shipped rules already have a multiplier applied and need nothing",
 		"check", "abctl annotates the cost total [bundled] rather than [configured]")
 }

@@ -23,7 +23,21 @@ type Entry struct {
 // Table is an immutable resolved rate table. Build one with NewTable; never
 // mutate one that is live, because a Registry hands the same pointer to every
 // concurrent reader.
-type Table struct{ rows []row }
+type Table struct {
+	rows []row
+	// mults are endpoint multiplier rules, most specific first. Kept separate from
+	// rows because a multiplier is a property of the ENDPOINT, not of a (host, model)
+	// pair: one rule scales every model that gateway serves, including ones no row
+	// names explicitly.
+	mults []multRule
+}
+
+type multRule struct {
+	host   string
+	spec   specificity
+	factor float64
+	prov   Provenance
+}
 
 type row struct {
 	host  string // lower-cased; "" or "*" means any
@@ -229,7 +243,7 @@ func (s specificity) beats(o specificity) bool {
 
 // NewTable compiles entries into a table, rejecting rows that cannot mean
 // anything useful.
-func NewTable(entries []Entry) (*Table, error) {
+func NewTable(entries []Entry, mults ...MultiplierRule) (*Table, error) {
 	t := &Table{rows: make([]row, 0, len(entries))}
 	// Duplicate rows were silently first-wins, so a config listing the same model
 	// twice under one endpoint had one of its rates quietly ignored — and which one
@@ -310,7 +324,76 @@ func NewTable(entries []Entry) (*Table, error) {
 			},
 		})
 	}
+	// Multiplier rules get the SAME two checks as rate rows above. They were skipped
+	// here, and both failures are silent in the same direction: a rule that never
+	// matches leaves its gateway at vendor list, which overstates a discounted gateway.
+	seenMult := make(map[string]struct{}, len(mults))
+	for i, m := range mults {
+		where := fmt.Sprintf("pricing multiplier[%d]", i)
+		if m.Host != "" {
+			where = fmt.Sprintf("pricing multiplier for host %q", m.Host)
+		}
+		if err := m.validate(where); err != nil {
+			return nil, err
+		}
+		switch m.Prov {
+		case ProvBundled, ProvDiscovered, ProvConfigured:
+		default:
+			return nil, fmt.Errorf("%s: provenance %d is not a table level", where, int(m.Prov))
+		}
+		host := strings.ToLower(m.Host)
+		// A port in the pattern can never match, because hostKey strips the port from
+		// the endpoint and never from the pattern. Copying an endpoint out of a URL is
+		// the likeliest way to write this field, so name the fix.
+		if !anyHost(host) {
+			if bare := hostKey(host); bare != host {
+				return nil, fmt.Errorf("%s: host pattern must not include a port (ports are stripped from the endpoint before matching, so this would never match); use %q", where, bare)
+			}
+		}
+		// Two rules with the same host and provenance rank equal, so multiplierFor keeps
+		// whichever came first and the other factor is silently ignored — and which one
+		// wins depends on config iteration order. Rejected, exactly as duplicate rate
+		// rows are.
+		dupKey := host + "\x00" + m.Prov.String()
+		if _, dup := seenMult[dupKey]; dup {
+			return nil, fmt.Errorf("%s: duplicate multiplier for this host at %s provenance; one of the two factors would be silently ignored", where, m.Prov)
+		}
+		seenMult[dupKey] = struct{}{}
+		t.mults = append(t.mults, multRule{
+			host:   host,
+			factor: m.Factor,
+			prov:   m.Prov,
+			spec: specificity{
+				namedHost: !anyHost(host),
+				exactHost: !anyHost(host) && (isIPv6Literal(host) || !strings.ContainsAny(host, globMeta)),
+				hostLen:   hostRankLen(host),
+				pattern:   host,
+			},
+		})
+	}
 	return t, nil
+}
+
+// multiplierFor returns the most specific matching factor and its provenance.
+//
+// Ranked by the same host rules as rate rows — a named host beats a catch-all, an exact
+// host beats a glob, a longer glob beats a shorter one — with provenance deciding first
+// so an operator's explicit factor outranks the shipped one for the same endpoint.
+func (t *Table) multiplierFor(endpoint string) (float64, Provenance) {
+	var best *multRule
+	for i := range t.mults {
+		m := &t.mults[i]
+		if !matchHost(m.host, endpoint) {
+			continue
+		}
+		if best == nil || m.prov > best.prov || (m.prov == best.prov && m.spec.beats(best.spec)) {
+			best = m
+		}
+	}
+	if best == nil {
+		return 1, ProvNone
+	}
+	return best.factor, best.prov
 }
 
 // Resolve returns the rates for one (endpoint, model) pair and where they came
@@ -324,7 +407,61 @@ func (t *Table) Resolve(endpoint, model string, promptTotal int) (Rates, Provena
 	if t == nil {
 		return Rates{}, ProvNone
 	}
-	// Built once per request, not per row: every row matches against the same forms.
+	best := t.bestRow(endpoint, model)
+	if best == nil {
+		return Rates{}, ProvNone
+	}
+	rates, prov := best.rates.At(promptTotal), best.prov
+	// A scaled figure reports the STRONGER of its two sources: bundled x bundled stays
+	// bundled, but either half configured makes the result configured.
+	//
+	// Because "bundled" is the label that means "you have told us nothing about this
+	// endpoint, expect it to be wrong" — it is what drives WarnIfUnpinned and what
+	// abctl annotates. An operator who set a multiplier HAS told us about their
+	// gateway, so reporting bundled would send them to pin rates they have effectively
+	// already pinned. The weaker reading looks more conservative and is in fact less
+	// informative.
+	f, mprov := t.multiplierFor(endpoint)
+	// A multiplier WEAKER than the rates it would scale is dropped.
+	//
+	// The case is an operator who measured their gateway and pinned the real per-model
+	// rates for a host that also carries a shipped multiplier: the pinned figures are
+	// already post-discount, so scaling them again understates spend by the factor —
+	// ~24% for the shipped 0.76, and understating is the direction this package treats
+	// as dangerous, because it hides cost rather than exaggerating it.
+	//
+	// Framed as provenance rather than as a special case for bundled: a scalar derived
+	// from list may only scale rates that are themselves list-derived. Configured rates
+	// with a configured multiplier still both apply — the operator asked for both, and
+	// `abctl pricing --host` shows the factor being applied.
+	if mprov < prov {
+		f, mprov = 1, ProvNone
+	}
+	// Provenance is bumped OUTSIDE the f != 1 guard. An operator who writes
+	// `multiplier: 1.0` to say "this endpoint bills at list" has told us about their
+	// gateway just as much as one who writes 0.76 — that is the whole rationale above —
+	// and gating the bump on the factor being interesting would report their deliberate
+	// pin as bundled, then send them a WarnIfUnpinned line telling them to pin it.
+	// multiplierFor returns ProvNone when nothing matches, so this is a no-op then.
+	if mprov > prov {
+		prov = mprov
+	}
+	if f != 1 {
+		rates = rates.scale(f)
+	}
+	return rates, prov
+}
+
+// bestRow picks the row that wins for one (endpoint, model) pair, or nil.
+//
+// Shared with the describe path rather than reimplemented there: two copies of this
+// ranking would diverge the first time it is touched, and the divergence would be silent
+// — a marker or an annotation attached to a different row than the one being charged.
+func (t *Table) bestRow(endpoint, model string) *row {
+	if t == nil {
+		return nil
+	}
+	// Built once per call, not per row: every row matches against the same forms.
 	forms := modelNameForms(strings.ToLower(strings.TrimSpace(model)))
 	var best *row
 	for i := range t.rows {
@@ -336,10 +473,7 @@ func (t *Table) Resolve(endpoint, model string, promptTotal int) (Rates, Provena
 			best = r
 		}
 	}
-	if best == nil {
-		return Rates{}, ProvNone
-	}
-	return best.rates.At(promptTotal), best.prov
+	return best
 }
 
 var _ Resolver = (*Table)(nil)

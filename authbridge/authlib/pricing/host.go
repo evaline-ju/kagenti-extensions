@@ -101,3 +101,14 @@ func validHostPattern(pattern string) error {
 	_, err := path.Match(pattern, "probe")
 	return err
 }
+
+// EndpointKey normalizes a request's target host the way rate resolution normalizes it:
+// lower-cased, port stripped.
+//
+// Exported so callers that key their own state on an endpoint — the drift reporter's
+// dedup set, for one — agree with matchHost about what counts as the same endpoint.
+// Keeping a private copy of this rule is how "GW.internal:443" and "gw.internal" came to
+// occupy two entries for one gateway.
+func EndpointKey(endpoint string) string {
+	return strings.ToLower(hostKey(endpoint))
+}

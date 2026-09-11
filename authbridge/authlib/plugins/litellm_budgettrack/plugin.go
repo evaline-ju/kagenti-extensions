@@ -41,15 +41,33 @@ import (
 
 // Response cost headers emitted by LiteLLM.
 //
-// responseCostHeader is the effective (post-discount) cost and is present on
-// OpenAI-style /v1/chat/completions responses. Newer LiteLLM releases — and the
-// Anthropic /v1/messages endpoint that Claude Code uses — do not emit it, only
-// the pre-discount "-original" variant, so we fall back to that when the bare
-// header is absent. Without the fallback, budget tracking silently records $0
-// for Anthropic-format traffic.
+// MEASURED 2026-09-11 against ete-litellm (LiteLLM 1.85.5), because an earlier version of
+// this comment had the semantics backwards and a reviewer reasonably concluded from it
+// that drift detection would false-positive on every Anthropic-format request:
+//
+//	/v1/chat/completions  both headers present, IDENTICAL values
+//	/v1/messages          only "-original", same value the other path reports
+//
+// For 16 input + 4 output tokens of claude-opus-5 both paths reported
+// 0.00013680000000000002, which is 0.76 x vendor list (16x$5 + 4x$25 per Mtok = 0.00018).
+// So "-original" is the cost the gateway ACTUALLY CHARGED, not a pre-discount list price,
+// and falling back to it compares like with like.
+//
+// "Original" refers to LiteLLM's OWN discount/margin layer, reported alongside in
+// X-Litellm-Response-Cost-{Discount,Margin}-Amount: original is the figure before that
+// layer is applied. This gateway runs neither (both report 0.0), so the two agree. A
+// gateway that DOES configure them would see them diverge, which is why checkDrift
+// checks those headers before comparing — see driftComparable.
+//
+// The fallback itself is load-bearing: without it, budget tracking silently records $0
+// for every Anthropic-format request, which is the shape Claude Code sends.
 const (
 	responseCostHeader         = "X-Litellm-Response-Cost"
 	responseCostOriginalHeader = "X-Litellm-Response-Cost-Original"
+
+	// LiteLLM's own adjustment layer, non-zero only where an operator configured it.
+	costDiscountAmountHeader = "X-Litellm-Response-Cost-Discount-Amount"
+	costMarginAmountHeader   = "X-Litellm-Response-Cost-Margin-Amount"
 )
 
 type budgetTrackConfig struct {
@@ -97,6 +115,9 @@ type BudgetTrack struct {
 	// rates is the process rate table, injected before Configure. Read only
 	// through costOf, which guards the nil interface.
 	rates pricing.Resolver
+
+	// drift reports when the table disagrees with the gateway's own figure.
+	drift driftReporter
 }
 
 // SetPricingResolver implements pricing.ResolverConsumer.
@@ -163,6 +184,9 @@ func (p *BudgetTrack) Configure(raw json.RawMessage) error {
 		return fmt.Errorf("litellm-budget-track: max_budget must be > 0")
 	}
 	p.loadLedger()
+	// Configure is also the hot-reload path, so drift's "already said that" state is
+	// cleared here: the reload may well BE the operator acting on a drift warning.
+	p.resetDrift()
 	return nil
 }
 
@@ -269,6 +293,11 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	}
 	switch {
 	case cost > 0:
+		if source == costevent.SourceGatewayHeader {
+			// Only a header cost is authoritative. Comparing a modelled figure against
+			// itself would always agree and say nothing.
+			p.checkDrift(pctx, cost)
+		}
 		if total, ok := p.accumulate(cost); ok {
 			p.emitCost(pctx, cost, source, total, provenance)
 		}

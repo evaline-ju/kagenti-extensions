@@ -368,15 +368,103 @@ pricing:
 service name and its external alias, bill identically, and repeating the whole models
 block per host invites the two copies to drift. Each host becomes its own table row.
 
+`multiplier` scales every rate that resolves for those hosts, including tiers and
+long-context thresholds. Absent means 1.0. A multiplier-only endpoint needs no `models`
+block. The factor is capped at 10, because `multiplier: 76` for `0.76` inflates every
+figure a hundredfold and reads as plausible in a config file.
+
+**Inspecting what is in effect.** No config file can answer this: the figures a request
+is charged come from your `pricing:` section *plus* the table compiled into the binary
+*plus* any shipped gateway discount. Two views:
+
+```
+abctl pricing                      every row, unscaled
+abctl pricing --host <gateway>     what that endpoint is charged, discount applied
+```
+
+Both are served by `GET /pricing/table[?host=]` on the diagnostic listener, beside
+`/config` and `/reload/status`.
+
 **Rates are scoped per endpoint**, which a per-plugin table could not express: the
 same model bills differently on a discounted gateway than on the vendor endpoint,
 and only the request's target host distinguishes them.
 
 ### Pinning a gateway that bills below list
 
-This is the one piece of configuration most deployments need, so it is worth stating
-plainly. The bundled table ships vendor-list prices; a gateway that bills below list is
-overstated until you pin it. Eight lines:
+The bundled table ships vendor-list prices, so a gateway that bills below list is
+overstated until Cortex knows the discount. **Most gateways bill a uniform fraction of
+list, and for those the whole answer is one scalar:**
+
+```yaml
+pricing:
+  endpoints:
+    - hosts: ["my-gateway.example.com"]
+      multiplier: 0.76        # a FRACTION of list, so 0.76 is a 24% discount
+```
+
+One number rather than twelve, and it **tracks upstream repricing**: the gateway's price
+is derived from list, so refreshing the bundled table moves both together. A copied rate
+card freezes today's numbers and goes stale silently.
+
+Some gateways already have a discount shipped with Cortex and need no configuration at
+all — `abctl pricing --host <gateway>` says which, and shows the rates in effect with
+their provenance. The `multiplier` you set outranks any shipped one.
+
+**Provenance decides before specificity, so a catch-all you configure beats a specific
+rule Cortex ships.** These are not equivalent:
+
+```yaml
+pricing:
+  endpoints:
+    - hosts: ["*"]            # applies to EVERY endpoint, including ones with a
+      multiplier: 0.9         # shipped discount — 0.9 replaces their 0.76
+```
+
+That is deliberate: a configured factor means an operator checked their bill, and a rule
+compiled into a binary should never silently win over that. But it does mean a catch-all
+written for one gateway quietly reprices the rest. Scope the `hosts` list unless you mean
+every endpoint, and check the result with `abctl pricing --host <gateway>`.
+
+To drop a shipped discount for an endpoint without scaling it, set `multiplier: 1.0`
+explicitly — that is a configured rule of 1.0, which outranks the shipped factor and
+leaves the rates at vendor list. Omitting `multiplier` does NOT do this; it leaves the
+shipped rule in force.
+
+**Measuring your gateway's factor.** You do not have to be told it — a LiteLLM gateway
+reports what it charged, so the factor is one division:
+
+```sh
+# Non-streamed, so the gateway settles the cost before replying. A streamed response
+# reports 0 in that header by design, which is why this cannot be learned from live
+# agent traffic.
+# --proto '=https' so a mistyped http:// URL fails instead of putting $KEY on the wire
+# in cleartext.
+curl -sD - -o /dev/null --proto '=https' "$GATEWAY/v1/messages" \
+  -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}' \
+  | grep -i x-litellm-response-cost-original
+```
+
+Divide that by what the same token counts cost at list (`abctl pricing` shows the list
+rates; the response's `usage` block gives the counts). Repeat for one more model: a single
+factor across both means a uniform discount and `multiplier` is the whole answer, while
+figures that disagree mean the prices are negotiated per model and need the `models`
+block below.
+
+Cortex checks this for you as traffic flows. When a non-streamed response carries a
+settled cost that disagrees with the modelled figure by more than 5%, `litellm-budget-track`
+warns once per endpoint and model with both numbers and the ratio — so a stale or missing
+factor announces itself rather than quietly misreporting spend.
+
+**Pinned rates are never scaled by a shipped multiplier.** If you pin per-model rates for
+a host that also matches a discount Cortex ships, the shipped factor is dropped for that
+host — your figures are already what the gateway charges, and scaling them again would
+understate spend by the factor. `abctl pricing --host <gateway>` shows `multiplier 1` there
+to confirm it. A multiplier you configure yourself does still apply on top of your own
+rates, since asking for both is a thing an operator can legitimately mean.
+
+Reach for per-model rates only when a gateway's prices are genuinely negotiated per
+model rather than derived from list:
 
 ```yaml
 pricing:
